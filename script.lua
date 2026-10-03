@@ -1,46 +1,38 @@
 --//========================================================//
 --//                 EGG AUTO RETURN                        //
---//                 Rayfield Edition                       //
+--//                    RAYFIELD                            //
 --//========================================================//
 
+-- Services
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ProximityPromptService = game:GetService("ProximityPromptService")
 
 local LocalPlayer = Players.LocalPlayer
 
---//========================================================//
---// REMOTES
---//========================================================//
+--==========================================================--
+-- RAYFIELD
+--==========================================================--
 
-local GameRemotes = ReplicatedStorage
-    :WaitForChild("Remotes")
-    :WaitForChild("Game")
+local Rayfield
 
-local RequestPlotEggs = GameRemotes:WaitForChild("RequestPlotEggs")
-local EggPickup = GameRemotes:WaitForChild("EggPickup")
-local EggArrivalClaim = GameRemotes:WaitForChild("EggArrivalClaim")
+local RayfieldSuccess, RayfieldResult = pcall(function()
+    return loadstring(game:HttpGet(
+        "https://sirius.menu/rayfield"
+    ))()
+end)
 
---//========================================================//
---// WORLD FOLDERS
---//========================================================//
+if not RayfieldSuccess then
+    warn("[Egg Auto] Rayfield failed to load:", RayfieldResult)
+    return
+end
 
-local EggSpawns = workspace:FindFirstChild("EggSpawns")
-local RenderedEggs = workspace:FindFirstChild("RenderedEggs")
-local Plots = workspace:FindFirstChild("Plots")
-
---//========================================================//
---// RAYFIELD
---//========================================================//
-
-local Rayfield = loadstring(
-    game:HttpGet("https://sirius.menu/rayfield")
-)()
+Rayfield = RayfieldResult
 
 local Window = Rayfield:CreateWindow({
     Name = "Egg Auto Return",
     LoadingTitle = "Egg Auto Return",
-    LoadingSubtitle = "RGC",
+    LoadingSubtitle = "Loading...",
     ConfigurationSaving = {
         Enabled = false
     },
@@ -55,18 +47,41 @@ local MainTab = Window:CreateTab(
     4483362458
 )
 
---//========================================================//
---// STATE
---//========================================================//
+--==========================================================--
+-- REMOTES
+--==========================================================--
+
+local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+local GameRemotes = Remotes:WaitForChild("Game")
+
+local RequestPlotEggs = GameRemotes:WaitForChild(
+    "RequestPlotEggs"
+)
+
+local EggPickup = GameRemotes:WaitForChild(
+    "EggPickup"
+)
+
+--==========================================================--
+-- WORLD
+--==========================================================--
+
+local function GetFolder(Name)
+    return workspace:FindFirstChild(Name)
+end
+
+--==========================================================--
+-- VARIABLES
+--==========================================================--
 
 local AutoEgg = false
 local Processing = false
 local LastPrompt = nil
 local LastEgg = nil
 
---//========================================================//
---// UUID CHECK
---//========================================================//
+--==========================================================--
+-- UUID
+--==========================================================--
 
 local function IsUUID(Value)
 
@@ -74,18 +89,18 @@ local function IsUUID(Value)
         return false
     end
 
-    Value = tostring(Value)
+    local String = tostring(Value)
 
-    return Value:match(
+    return String:match(
         "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
     ) ~= nil
 end
 
---//========================================================//
---// SEARCH ONE OBJECT FOR UUID
---//========================================================//
+--==========================================================--
+-- SEARCH UUID
+--==========================================================--
 
-local function SearchForUUID(Object)
+local function SearchUUID(Object)
 
     if not Object then
         return nil
@@ -110,10 +125,14 @@ local function SearchForUUID(Object)
         end
     end
 
-    -- Value objects
+    -- Children / descendants
     for _, Child in ipairs(
         Object:GetDescendants()
     ) do
+
+        if IsUUID(Child.Name) then
+            return Child.Name
+        end
 
         if Child:IsA("StringValue")
             or Child:IsA("IntValue")
@@ -122,10 +141,6 @@ local function SearchForUUID(Object)
             if IsUUID(Child.Value) then
                 return tostring(Child.Value)
             end
-        end
-
-        if IsUUID(Child.Name) then
-            return Child.Name
         end
 
         for Name, Value in pairs(
@@ -145,11 +160,11 @@ local function SearchForUUID(Object)
     return nil
 end
 
---//========================================================//
---// GET EGG POSITION
---//========================================================//
+--==========================================================--
+-- POSITION
+--==========================================================--
 
-local function GetObjectPosition(Object)
+local function GetPosition(Object)
 
     if not Object then
         return nil
@@ -163,21 +178,21 @@ local function GetObjectPosition(Object)
         return Object:GetPivot().Position
     end
 
-    for _, Child in ipairs(
+    for _, Object2 in ipairs(
         Object:GetDescendants()
     ) do
 
-        if Child:IsA("BasePart") then
-            return Child.Position
+        if Object2:IsA("BasePart") then
+            return Object2.Position
         end
     end
 
     return nil
 end
 
---//========================================================//
---// FIND NEAREST RENDERED EGG
---//========================================================//
+--==========================================================--
+-- NEAREST EGG
+--==========================================================--
 
 local function FindNearestEgg(Prompt)
 
@@ -195,124 +210,93 @@ local function FindNearestEgg(Prompt)
         return nil
     end
 
-    local PromptPosition = GetObjectPosition(
-        Prompt
-    )
+    local PromptPosition = GetPosition(Prompt)
 
-    local BestEgg = nil
-    local BestDistance = math.huge
+    local Closest = nil
+    local ClosestDistance = math.huge
 
-    --------------------------------------------------------
-    -- RenderedEggs
-    --------------------------------------------------------
+    local Containers = {
+        GetFolder("RenderedEggs"),
+        GetFolder("EggSpawns")
+    }
 
-    if RenderedEggs then
+    for _, Container in ipairs(Containers) do
 
-        for _, Egg in ipairs(
-            RenderedEggs:GetChildren()
-        ) do
+        if Container then
 
-            local Position = GetObjectPosition(Egg)
+            for _, Egg in ipairs(
+                Container:GetChildren()
+            ) do
 
-            if Position then
+                local Position = GetPosition(Egg)
 
-                local Distance
+                if Position then
 
-                if PromptPosition then
-                    Distance = (
-                        Position - PromptPosition
-                    ).Magnitude
-                else
-                    Distance = (
-                        Position - Root.Position
-                    ).Magnitude
-                end
+                    local Distance
 
-                if Distance < BestDistance then
+                    if PromptPosition then
+                        Distance = (
+                            Position - PromptPosition
+                        ).Magnitude
+                    else
+                        Distance = (
+                            Position - Root.Position
+                        ).Magnitude
+                    end
 
-                    BestDistance = Distance
-                    BestEgg = Egg
+                    if Distance < ClosestDistance then
 
-                end
-            end
-        end
-    end
+                        ClosestDistance = Distance
+                        Closest = Egg
 
-    --------------------------------------------------------
-    -- EggSpawns fallback
-    --------------------------------------------------------
-
-    if not BestEgg and EggSpawns then
-
-        for _, Egg in ipairs(
-            EggSpawns:GetChildren()
-        ) do
-
-            local Position = GetObjectPosition(Egg)
-
-            if Position then
-
-                local Distance = (
-                    Position - Root.Position
-                ).Magnitude
-
-                if Distance < BestDistance then
-
-                    BestDistance = Distance
-                    BestEgg = Egg
-
+                    end
                 end
             end
         end
     end
 
-    return BestEgg
+    return Closest
 end
 
---//========================================================//
---// FIND EGG UUID
---//========================================================//
+--==========================================================--
+-- FIND EGG UUID
+--==========================================================--
 
 local function FindEggUUID(Prompt)
 
-    --------------------------------------------------------
-    -- First: exact prompt
-    --------------------------------------------------------
-
-    local UUID = SearchForUUID(Prompt)
+    -- Prompt itself
+    local UUID = SearchUUID(Prompt)
 
     if UUID then
         return UUID
     end
 
-    --------------------------------------------------------
-    -- Second: nearest rendered egg
-    --------------------------------------------------------
-
+    -- Nearby egg
     local Egg = FindNearestEgg(Prompt)
 
     if Egg then
 
         LastEgg = Egg
 
-        UUID = SearchForUUID(Egg)
+        UUID = SearchUUID(Egg)
 
         if UUID then
             return UUID
         end
     end
 
-    --------------------------------------------------------
-    -- Third: search all RenderedEggs
-    --------------------------------------------------------
+    -- RenderedEggs
+    local Rendered = GetFolder(
+        "RenderedEggs"
+    )
 
-    if RenderedEggs then
+    if Rendered then
 
         for _, Egg in ipairs(
-            RenderedEggs:GetChildren()
+            Rendered:GetChildren()
         ) do
 
-            UUID = SearchForUUID(Egg)
+            UUID = SearchUUID(Egg)
 
             if UUID then
                 return UUID
@@ -320,17 +304,18 @@ local function FindEggUUID(Prompt)
         end
     end
 
-    --------------------------------------------------------
-    -- Fourth: search EggSpawns
-    --------------------------------------------------------
+    -- EggSpawns
+    local Spawns = GetFolder(
+        "EggSpawns"
+    )
 
-    if EggSpawns then
+    if Spawns then
 
         for _, Egg in ipairs(
-            EggSpawns:GetChildren()
+            Spawns:GetChildren()
         ) do
 
-            UUID = SearchForUUID(Egg)
+            UUID = SearchUUID(Egg)
 
             if UUID then
                 return UUID
@@ -341,46 +326,44 @@ local function FindEggUUID(Prompt)
     return nil
 end
 
---//========================================================//
---// FIND PLAYER PLOT
---//========================================================//
+--==========================================================--
+-- FIND OWN PLOT
+--==========================================================--
 
 local function FindOwnPlot()
+
+    local Plots = GetFolder("Plots")
 
     if not Plots then
         return nil
     end
 
-    local Name = LocalPlayer.Name
+    local PlayerName = LocalPlayer.Name
     local DisplayName = LocalPlayer.DisplayName
-    local UserId = tostring(LocalPlayer.UserId)
+    local UserId = tostring(
+        LocalPlayer.UserId
+    )
 
     for _, Plot in ipairs(
         Plots:GetChildren()
     ) do
 
-        ----------------------------------------------------
         -- Attributes
-        ----------------------------------------------------
-
-        for AttributeName, Value in pairs(
+        for Name, Value in pairs(
             Plot:GetAttributes()
         ) do
 
-            local StringValue = tostring(Value)
+            local String = tostring(Value)
 
-            if StringValue == Name
-                or StringValue == DisplayName
-                or StringValue == UserId then
+            if String == PlayerName
+                or String == DisplayName
+                or String == UserId then
 
                 return Plot
             end
         end
 
-        ----------------------------------------------------
-        -- Descendants
-        ----------------------------------------------------
-
+        -- Values
         for _, Object in ipairs(
             Plot:GetDescendants()
         ) do
@@ -391,7 +374,7 @@ local function FindOwnPlot()
                     Object.Value
                 )
 
-                if Value == Name
+                if Value == PlayerName
                     or Value == DisplayName
                     or Value == UserId then
 
@@ -409,11 +392,10 @@ local function FindOwnPlot()
                 end
             end
 
-            if Object:IsA("ObjectValue") then
+            if Object:IsA("ObjectValue")
+                and Object.Value == LocalPlayer then
 
-                if Object.Value == LocalPlayer then
-                    return Plot
-                end
+                return Plot
             end
         end
     end
@@ -421,9 +403,9 @@ local function FindOwnPlot()
     return nil
 end
 
---//========================================================//
---// GET PLOT POSITION
---//========================================================//
+--==========================================================--
+-- GET PLOT CFRAME
+--==========================================================--
 
 local function GetPlotCFrame(Plot)
 
@@ -436,10 +418,6 @@ local function GetPlotCFrame(Plot)
         return Plot.CFrame
             + Vector3.new(0, 5, 0)
     end
-
-    --------------------------------------------------------
-    -- Common spawn names
-    --------------------------------------------------------
 
     local Names = {
         "Spawn",
@@ -468,10 +446,6 @@ local function GetPlotCFrame(Plot)
         end
     end
 
-    --------------------------------------------------------
-    -- Plot pivot
-    --------------------------------------------------------
-
     local Success, Pivot = pcall(function()
         return Plot:GetPivot()
     end)
@@ -481,10 +455,6 @@ local function GetPlotCFrame(Plot)
         return Pivot
             + Vector3.new(0, 5, 0)
     end
-
-    --------------------------------------------------------
-    -- First BasePart
-    --------------------------------------------------------
 
     for _, Object in ipairs(
         Plot:GetDescendants()
@@ -500,9 +470,9 @@ local function GetPlotCFrame(Plot)
     return nil
 end
 
---//========================================================//
---// TELEPORT TO OWN PLOT
---//========================================================//
+--==========================================================--
+-- TELEPORT TO PLOT
+--==========================================================--
 
 local function ReturnToPlot()
 
@@ -525,7 +495,7 @@ local function ReturnToPlot()
     if not Plot then
 
         warn(
-            "[Egg Auto] Own plot not found."
+            "[Egg Auto] Plot not found"
         )
 
         return false
@@ -542,9 +512,9 @@ local function ReturnToPlot()
     return true
 end
 
---//========================================================//
---// IS EGG PROMPT
---//========================================================//
+--==========================================================--
+-- EGG CHECK
+--==========================================================--
 
 local function IsEggPrompt(Prompt)
 
@@ -594,9 +564,9 @@ local function IsEggPrompt(Prompt)
     return false
 end
 
---//========================================================//
---// PROCESS EGG
---//========================================================//
+--==========================================================--
+-- PROCESS EGG
+--==========================================================--
 
 local function ProcessEgg(Prompt)
 
@@ -616,23 +586,16 @@ local function ProcessEgg(Prompt)
     LastPrompt = Prompt
 
     print(
-        "[Egg Auto] Egg prompt detected:",
+        "[Egg Auto] Egg detected:",
         Prompt:GetFullName()
     )
 
-    --------------------------------------------------------
-    -- Refresh plot eggs
-    --------------------------------------------------------
-
+    -- Refresh egg information
     pcall(function()
         RequestPlotEggs:FireServer(false)
     end)
 
     task.wait(0.1)
-
-    --------------------------------------------------------
-    -- Find UUID
-    --------------------------------------------------------
 
     local UUID = FindEggUUID(Prompt)
 
@@ -644,7 +607,7 @@ local function ProcessEgg(Prompt)
 
         Rayfield:Notify({
             Title = "Egg Auto",
-            Content = "Egg detected, but its UUID isn't exposed in the egg objects.",
+            Content = "Egg detected, but UUID was not found.",
             Duration = 3
         })
 
@@ -657,10 +620,7 @@ local function ProcessEgg(Prompt)
         UUID
     )
 
-    --------------------------------------------------------
     -- Pickup
-    --------------------------------------------------------
-
     local Success, Error = pcall(function()
 
         EggPickup:FireServer(UUID)
@@ -670,7 +630,7 @@ local function ProcessEgg(Prompt)
     if not Success then
 
         warn(
-            "[Egg Auto] EggPickup error:",
+            "[Egg Auto] Pickup error:",
             Error
         )
 
@@ -679,22 +639,17 @@ local function ProcessEgg(Prompt)
     end
 
     print(
-        "[Egg Auto] EggPickup sent."
+        "[Egg Auto] EggPickup fired."
     )
-
-    --------------------------------------------------------
-    -- Return immediately
-    --------------------------------------------------------
 
     task.wait(0.05)
 
-    local Returned = ReturnToPlot()
-
-    if Returned then
+    -- Return
+    if ReturnToPlot() then
 
         Rayfield:Notify({
             Title = "Egg Auto",
-            Content = "Egg picked up → returned to your plot.",
+            Content = "Egg picked up and returned to your plot.",
             Duration = 2
         })
 
@@ -702,7 +657,7 @@ local function ProcessEgg(Prompt)
 
         Rayfield:Notify({
             Title = "Egg Auto",
-            Content = "Pickup succeeded, but plot teleport failed.",
+            Content = "Pickup sent, but plot teleport failed.",
             Duration = 3
         })
     end
@@ -712,9 +667,9 @@ local function ProcessEgg(Prompt)
     Processing = false
 end
 
---//========================================================//
---// PROMPT LISTENER
---//========================================================//
+--==========================================================--
+-- PROXIMITY PROMPT
+--==========================================================--
 
 ProximityPromptService.PromptTriggered:Connect(
     function(Prompt, Player)
@@ -731,35 +686,25 @@ ProximityPromptService.PromptTriggered:Connect(
     end
 )
 
---//========================================================//
---// UI
---//========================================================//
+--==========================================================--
+-- UI
+--==========================================================--
 
 MainTab:CreateToggle({
     Name = "Auto Egg Return",
     CurrentValue = false,
-    Flag = "AutoEggReturn",
 
     Callback = function(Value)
 
         AutoEgg = Value
 
-        if Value then
-
-            Rayfield:Notify({
-                Title = "Egg Auto",
-                Content = "Enabled.",
-                Duration = 2
-            })
-
-        else
-
-            Rayfield:Notify({
-                Title = "Egg Auto",
-                Content = "Disabled.",
-                Duration = 2
-            })
-        end
+        Rayfield:Notify({
+            Title = "Egg Auto",
+            Content = Value
+                and "Enabled"
+                or "Disabled",
+            Duration = 2
+        })
     end
 })
 
@@ -788,7 +733,7 @@ MainTab:CreateButton({
 })
 
 MainTab:CreateButton({
-    Name = "Refresh Plot Eggs",
+    Name = "Request Plot Eggs",
 
     Callback = function()
 
@@ -796,130 +741,29 @@ MainTab:CreateButton({
             RequestPlotEggs:FireServer(false)
         end)
 
-        if Success then
-
-            Rayfield:Notify({
-                Title = "Eggs",
-                Content = "Plot eggs requested.",
-                Duration = 2
-            })
-
-        else
-
-            Rayfield:Notify({
-                Title = "Eggs",
-                Content = "Request failed.",
-                Duration = 2
-            })
-        end
+        Rayfield:Notify({
+            Title = "Eggs",
+            Content = Success
+                and "Egg request sent."
+                or "Request failed.",
+            Duration = 2
+        })
     end
 })
 
---//========================================================//
---// DEBUG EGG STRUCTURE
---//========================================================//
-
-MainTab:CreateButton({
-    Name = "Debug Egg",
-
-    Callback = function()
-
-        local Egg = LastEgg
-
-        if not Egg then
-            Egg = FindNearestEgg(LastPrompt)
-        end
-
-        if not Egg then
-
-            Rayfield:Notify({
-                Title = "Debug",
-                Content = "No rendered egg found.",
-                Duration = 3
-            })
-
-            return
-        end
-
-        print("================================")
-        print("           EGG DEBUG")
-        print("================================")
-
-        print(
-            "Egg:",
-            Egg:GetFullName()
-        )
-
-        print(
-            "Class:",
-            Egg.ClassName
-        )
-
-        print("--- ATTRIBUTES ---")
-
-        for Name, Value in pairs(
-            Egg:GetAttributes()
-        ) do
-
-            print(
-                Name,
-                "=",
-                Value
-            )
-        end
-
-        print("--- DESCENDANTS ---")
-
-        for _, Object in ipairs(
-            Egg:GetDescendants()
-        ) do
-
-            print(
-                Object:GetFullName(),
-                "|",
-                Object.ClassName
-            )
-
-            for Name, Value in pairs(
-                Object:GetAttributes()
-            ) do
-
-                print(
-                    "   ATTRIBUTE:",
-                    Name,
-                    "=",
-                    Value
-                )
-            end
-
-            if Object:IsA("StringValue")
-                or Object:IsA("IntValue")
-                or Object:IsA("NumberValue") then
-
-                print(
-                    "   VALUE:",
-                    Object.Value
-                )
-            end
-        end
-
-        print("================================")
-    end
-})
-
---//========================================================//
---// STATUS
-//========================================================//
+--==========================================================--
+-- STATUS
+--==========================================================--
 
 MainTab:CreateParagraph({
-    Title = "Egg Auto",
+    Title = "Status",
     Content =
-        "Watches egg ProximityPrompts, searches RenderedEggs/EggSpawns for the egg UUID, fires EggPickup, then returns to your own plot."
+        "Detects egg prompts → searches RenderedEggs/EggSpawns → sends EggPickup → returns to your plot."
 })
 
---//========================================================//
---// LOADED
-//========================================================//
+--==========================================================--
+-- START
+--==========================================================--
 
 Rayfield:Notify({
     Title = "Egg Auto Return",
@@ -927,22 +771,8 @@ Rayfield:Notify({
     Duration = 3
 })
 
-print(
-    "[Egg Auto] Loaded | Player:",
-    LocalPlayer.Name
-)
-
-print(
-    "[Egg Auto] EggSpawns:",
-    EggSpawns
-)
-
-print(
-    "[Egg Auto] RenderedEggs:",
-    RenderedEggs
-)
-
-print(
-    "[Egg Auto] Plots:",
-    Plots
-)
+print("[Egg Auto] Loaded")
+print("[Egg Auto] Player:", LocalPlayer.Name)
+print("[Egg Auto] Plots:", GetFolder("Plots"))
+print("[Egg Auto] EggSpawns:", GetFolder("EggSpawns"))
+print("[Egg Auto] RenderedEggs:", GetFolder("RenderedEggs"))
