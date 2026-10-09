@@ -1,19 +1,14 @@
---// Rage Hub · Steal An Egg automation
---// Built for RageHub v1.0.0 UI API.
+--// SaeBeta · standalone UI version
+--// Uses a local ScreenGui; no Rage Hub library is downloaded or loaded.
 --// Research note: live community egg/biome catalogues change frequently; the scanner
 --// prefers rarity/biome/egg metadata actually replicated in the current server.
 --// If the game does not expose a label/attribute, the script cannot reliably infer it.
-
-local RAGEHUB_URL = "https://raw.githubusercontent.com/devnamegelo/Rage-Hub/main/RageHub.lua"
-local RageHub = loadstring(game:HttpGet(RAGEHUB_URL))()
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local ProximityPromptService = game:GetService("ProximityPromptService")
-local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
-local VirtualUser = game:GetService("VirtualUser")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -75,10 +70,6 @@ local KNOWN_RARITY_BY_NAME = {
 local AUTO_TREADMILL = false
 local AUTO_STEAL = false
 local MANUAL_INSTANT_STEAL = false
-local ANTI_AFK = false
-local AUTO_RECONNECT = false
-local AUTO_SMALLEST_SERVER = false
-local AUTO_SAVE_CONFIG = true
 
 local SelectedRarities = {}
 local SelectedBiomes = {}
@@ -97,39 +88,298 @@ local TreadmillCandidateIndex = 0
 local LastAttemptTime = setmetatable({}, {__mode = "k"})
 local LastNotification = ""
 local LastNotificationTime = 0
-local AFKConnection = nil
-local ReconnectAttempts = 0
 local LastTargetDescription = "Waiting for a matching egg..."
 
 local Env = _G
 pcall(function() if type(getgenv) == "function" then Env = getgenv() end end)
-if type(Env.__RageHubSavedTreadmill) == "table" then
-    local saved = Env.__RageHubSavedTreadmill
+if type(Env.__SaeBetaSavedTreadmill) == "table" then
+    local saved = Env.__SaeBetaSavedTreadmill
     if type(saved.X) == "number" and type(saved.Y) == "number" and type(saved.Z) == "number" then
         SavedTreadmillPosition = Vector3.new(saved.X, saved.Y, saved.Z)
     end
 end
 
 --==============================================================
--- UI
+-- STANDALONE UI (no external library)
 --==============================================================
 
-local Window = RageHub:CreateWindow({
-    Name = "Rage Hub",
-    Subtitle = "Steal An Egg · Rage Hub",
-    Theme = "Rage",
-    Features = { Notifications = true },
-    ConfigFolder = "RageHub/StealAnEgg",
-    AutoSave = "autosave",
-    Splash = true,
-    Watermark = true,
-})
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "SaeBetaUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = PlayerGui
 
--- Minimal UI: only the three requested tabs are created.
+local UI = {Tabs = {}, CurrentTab = nil}
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.new(0, 330, 0, 390)
+Main.Position = UDim2.new(0.5, -165, 0.5, -195)
+Main.BackgroundColor3 = Color3.fromRGB(19, 21, 29)
+Main.BorderSizePixel = 0
+Main.Parent = ScreenGui
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 12)
+local MainStroke = Instance.new("UIStroke", Main)
+MainStroke.Color = Color3.fromRGB(77, 105, 255)
+MainStroke.Thickness = 1.2
+
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 43)
+Header.BackgroundColor3 = Color3.fromRGB(27, 30, 42)
+Header.BorderSizePixel = 0
+Header.Parent = Main
+Instance.new("UICorner", Header).CornerRadius = UDim.new(0, 12)
+local HeaderCover = Instance.new("Frame")
+HeaderCover.Size = UDim2.new(1, 0, 0, 12)
+HeaderCover.Position = UDim2.new(0, 0, 1, -12)
+HeaderCover.BackgroundColor3 = Header.BackgroundColor3
+HeaderCover.BorderSizePixel = 0
+HeaderCover.Parent = Header
+local Title = Instance.new("TextLabel")
+Title.BackgroundTransparency = 1
+Title.Position = UDim2.new(0, 13, 0, 0)
+Title.Size = UDim2.new(1, -54, 1, 0)
+Title.Font = Enum.Font.GothamBold
+Title.Text = "SaeBeta"
+Title.TextSize = 16
+Title.TextColor3 = Color3.fromRGB(245, 247, 255)
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Header
+local Close = Instance.new("TextButton")
+Close.Size = UDim2.new(0, 30, 0, 28)
+Close.Position = UDim2.new(1, -36, 0, 7)
+Close.Text = "×"
+Close.Font = Enum.Font.GothamBold
+Close.TextSize = 21
+Close.TextColor3 = Color3.fromRGB(255, 255, 255)
+Close.BackgroundColor3 = Color3.fromRGB(177, 56, 70)
+Close.BorderSizePixel = 0
+Close.Parent = Header
+Instance.new("UICorner", Close).CornerRadius = UDim.new(0, 7)
+Close.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
+
+local TabBar = Instance.new("Frame")
+TabBar.Position = UDim2.new(0, 8, 0, 49)
+TabBar.Size = UDim2.new(1, -16, 0, 35)
+TabBar.BackgroundTransparency = 1
+TabBar.Parent = Main
+local TabLayout = Instance.new("UIListLayout", TabBar)
+TabLayout.FillDirection = Enum.FillDirection.Horizontal
+TabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+TabLayout.Padding = UDim.new(0, 5)
+
+local Pages = Instance.new("Frame")
+Pages.Position = UDim2.new(0, 9, 0, 90)
+Pages.Size = UDim2.new(1, -18, 1, -100)
+Pages.BackgroundTransparency = 1
+Pages.Parent = Main
+
+-- Make the panel draggable on desktop and touch devices.
+do
+    local dragging, dragInput, dragStart, startPos
+    Header.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true; dragStart = input.Position; startPos = Main.Position
+            input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
+        end
+    end)
+    Header.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
+    end)
+    game:GetService("UserInputService").InputChanged:Connect(function(input)
+        if dragging and (input == dragInput or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+end
+
+local function SwitchTab(tab)
+    UI.CurrentTab = tab
+    for _, item in ipairs(UI.Tabs) do
+        item.Page.Visible = item == tab
+        item.Button.BackgroundColor3 = item == tab and Color3.fromRGB(70, 91, 220) or Color3.fromRGB(39, 43, 58)
+    end
+end
+
+function UI:CreateTab(name, icon)
+    local tab = {Name = name, Sections = {}}
+    tab.Button = Instance.new("TextButton")
+    tab.Button.Size = UDim2.new(0, 100, 1, 0)
+    tab.Button.BackgroundColor3 = Color3.fromRGB(39, 43, 58)
+    tab.Button.BorderSizePixel = 0
+    tab.Button.Text = (icon and (icon .. " ") or "") .. name
+    tab.Button.TextColor3 = Color3.fromRGB(240, 242, 255)
+    tab.Button.TextSize = 10
+    tab.Button.Font = Enum.Font.GothamSemibold
+    tab.Button.TextWrapped = true
+    tab.Button.Parent = TabBar
+    Instance.new("UICorner", tab.Button).CornerRadius = UDim.new(0, 7)
+    tab.Page = Instance.new("ScrollingFrame")
+    tab.Page.Size = UDim2.new(1, 0, 1, 0)
+    tab.Page.BackgroundTransparency = 1
+    tab.Page.BorderSizePixel = 0
+    tab.Page.ScrollBarThickness = 3
+    tab.Page.CanvasSize = UDim2.new(0, 0, 0, 0)
+    tab.Page.Visible = false
+    tab.Page.Parent = Pages
+    local layout = Instance.new("UIListLayout", tab.Page)
+    layout.Padding = UDim.new(0, 8)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        tab.Page.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 8)
+    end)
+    tab.Button.MouseButton1Click:Connect(function() SwitchTab(tab) end)
+    table.insert(UI.Tabs, tab)
+    if #UI.Tabs == 1 then SwitchTab(tab) end
+    function tab:CreateSection(sectionName)
+        local section = {Tab = tab, Name = sectionName}
+        local container = Instance.new("Frame")
+        container.Size = UDim2.new(1, -4, 0, 38)
+        container.AutomaticSize = Enum.AutomaticSize.Y
+        container.BackgroundColor3 = Color3.fromRGB(27, 30, 41)
+        container.BorderSizePixel = 0
+        container.Parent = tab.Page
+        Instance.new("UICorner", container).CornerRadius = UDim.new(0, 8)
+        local padding = Instance.new("UIPadding", container)
+        padding.PaddingTop = UDim.new(0, 8); padding.PaddingBottom = UDim.new(0, 8)
+        padding.PaddingLeft = UDim.new(0, 8); padding.PaddingRight = UDim.new(0, 8)
+        local vertical = Instance.new("UIListLayout", container)
+        vertical.Padding = UDim.new(0, 6)
+        vertical.SortOrder = Enum.SortOrder.LayoutOrder
+        local heading = Instance.new("TextLabel")
+        heading.Size = UDim2.new(1, 0, 0, 20)
+        heading.BackgroundTransparency = 1
+        heading.Text = sectionName
+        heading.TextColor3 = Color3.fromRGB(133, 157, 255)
+        heading.Font = Enum.Font.GothamBold
+        heading.TextSize = 12
+        heading.TextXAlignment = Enum.TextXAlignment.Left
+        heading.LayoutOrder = 0
+        heading.Parent = container
+        local order = 1
+        function section:CreateToggle(opts)
+            local enabled = opts.Default == true
+            local button = Instance.new("TextButton")
+            button.Size = UDim2.new(1, 0, 0, 38)
+            button.BackgroundColor3 = Color3.fromRGB(38, 42, 56)
+            button.BorderSizePixel = 0
+            button.TextColor3 = Color3.fromRGB(245, 246, 252)
+            button.Font = Enum.Font.GothamSemibold
+            button.TextSize = 12
+            button.TextXAlignment = Enum.TextXAlignment.Left
+            button.LayoutOrder = order; order += 1
+            button.Parent = container
+            Instance.new("UICorner", button).CornerRadius = UDim.new(0, 6)
+            local function refresh()
+                button.Text = (enabled and "  ●  " or "  ○  ") .. tostring(opts.Name)
+                button.BackgroundColor3 = enabled and Color3.fromRGB(48, 75, 133) or Color3.fromRGB(38, 42, 56)
+            end
+            refresh()
+            button.MouseButton1Click:Connect(function()
+                enabled = not enabled; refresh()
+                if opts.Callback then local ok, err = pcall(opts.Callback, enabled); if not ok then warn("SaeBeta toggle error: " .. tostring(err)) end end
+            end)
+            return {Set = function(_, value) enabled = value == true; refresh() end, Get = function() return enabled end}
+        end
+        function section:CreateDropdown(opts)
+            local selected = {}
+            if type(opts.Default) == "table" then for _, v in ipairs(opts.Default) do selected[tostring(v)] = true end end
+            local header = Instance.new("TextButton")
+            header.Size = UDim2.new(1, 0, 0, 36)
+            header.BackgroundColor3 = Color3.fromRGB(38, 42, 56)
+            header.BorderSizePixel = 0
+            header.TextColor3 = Color3.fromRGB(245, 246, 252)
+            header.Font = Enum.Font.GothamSemibold
+            header.TextSize = 12
+            header.TextXAlignment = Enum.TextXAlignment.Left
+            header.Text = "  " .. tostring(opts.Name) .. "  ▾"
+            header.LayoutOrder = order; order += 1; header.Parent = container
+            Instance.new("UICorner", header).CornerRadius = UDim.new(0, 6)
+            local list = Instance.new("Frame")
+            list.Size = UDim2.new(1, 0, 0, 0)
+            list.AutomaticSize = Enum.AutomaticSize.Y
+            list.BackgroundTransparency = 1
+            list.Visible = false
+            list.LayoutOrder = order; order += 1; list.Parent = container
+            local listLayout = Instance.new("UIListLayout", list)
+            listLayout.Padding = UDim.new(0, 3)
+            local function emit()
+                local arr = {}
+                for _, option in ipairs(opts.Options or {}) do if selected[tostring(option)] then table.insert(arr, option) end end
+                if opts.Callback then local ok, err = pcall(opts.Callback, arr); if not ok then warn("SaeBeta dropdown error: " .. tostring(err)) end end
+            end
+            header.MouseButton1Click:Connect(function() list.Visible = not list.Visible; header.Text = "  " .. tostring(opts.Name) .. (list.Visible and "  ▴" or "  ▾") end)
+            for _, option in ipairs(opts.Options or {}) do
+                local optButton = Instance.new("TextButton")
+                optButton.Size = UDim2.new(1, 0, 0, 30)
+                optButton.BackgroundColor3 = selected[tostring(option)] and Color3.fromRGB(48, 75, 133) or Color3.fromRGB(34, 37, 50)
+                optButton.BorderSizePixel = 0
+                optButton.TextColor3 = Color3.fromRGB(235, 238, 248)
+                optButton.Font = Enum.Font.Gotham
+                optButton.TextSize = 11
+                optButton.TextXAlignment = Enum.TextXAlignment.Left
+                optButton.Text = (selected[tostring(option)] and "  ✓  " or "  □  ") .. tostring(option)
+                optButton.Parent = list
+                Instance.new("UICorner", optButton).CornerRadius = UDim.new(0, 5)
+                optButton.MouseButton1Click:Connect(function()
+                    if opts.Multi then selected[tostring(option)] = not selected[tostring(option)]
+                    else table.clear(selected); selected[tostring(option)] = true end
+                    optButton.Text = (selected[tostring(option)] and "  ✓  " or "  □  ") .. tostring(option)
+                    optButton.BackgroundColor3 = selected[tostring(option)] and Color3.fromRGB(48, 75, 133) or Color3.fromRGB(34, 37, 50)
+                    emit()
+                end)
+            end
+            if opts.SelectAll then
+                local all = Instance.new("TextButton")
+                all.Size = UDim2.new(1, 0, 0, 30); all.BackgroundColor3 = Color3.fromRGB(61, 67, 91)
+                all.BorderSizePixel = 0; all.Text = "Select all / clear"; all.TextColor3 = Color3.new(1,1,1)
+                all.Font = Enum.Font.GothamSemibold; all.TextSize = 11; all.Parent = list
+                Instance.new("UICorner", all).CornerRadius = UDim.new(0, 5)
+                all.MouseButton1Click:Connect(function()
+                    local any = false; for _, option in ipairs(opts.Options or {}) do if not selected[tostring(option)] then any = true end end
+                    table.clear(selected); if any then for _, option in ipairs(opts.Options or {}) do selected[tostring(option)] = true end end
+                    for _, child in ipairs(list:GetChildren()) do
+                        if child:IsA("TextButton") and child ~= all then
+                            local label = child.Text:gsub("^%s*[✓□]%s*", "")
+                            child.Text = (selected[label] and "  ✓  " or "  □  ") .. label
+                            child.BackgroundColor3 = selected[label] and Color3.fromRGB(48, 75, 133) or Color3.fromRGB(34, 37, 50)
+                        end
+                    end
+                    emit()
+                end)
+            end
+            return {Get = function() local arr = {}; for _, v in ipairs(opts.Options or {}) do if selected[tostring(v)] then table.insert(arr,v) end end; return arr end}
+        end
+        return section
+    end
+    return tab
+end
+
+function UI:Notify(opts)
+    local toast = Instance.new("TextLabel")
+    toast.AnchorPoint = Vector2.new(1, 0)
+    toast.Position = UDim2.new(1, -12, 0, 12)
+    toast.Size = UDim2.new(0, 280, 0, 58)
+    toast.BackgroundColor3 = Color3.fromRGB(27, 30, 42)
+    toast.BorderSizePixel = 0
+    toast.TextColor3 = Color3.fromRGB(245, 247, 255)
+    toast.Font = Enum.Font.Gotham
+    toast.TextSize = 12
+    toast.TextWrapped = true
+    toast.Text = tostring(opts.Title or "SaeBeta") .. "\n" .. tostring(opts.Content or "")
+    toast.ZIndex = 20
+    toast.Parent = ScreenGui
+    Instance.new("UICorner", toast).CornerRadius = UDim.new(0, 8)
+    local stroke = Instance.new("UIStroke", toast); stroke.Color = Color3.fromRGB(77, 105, 255)
+    task.delay(tonumber(opts.Duration) or 2.5, function() if toast.Parent then toast:Destroy() end end)
+end
+function UI:LoadConfig() end -- standalone version intentionally does not load library configs
+
+local Window = UI
 local TreadmillTab = Window:CreateTab("Auto Treadmill", "🏃")
 local InstantStealTab = Window:CreateTab("Instant Steal", "⚡")
 local AutoStealFilterTab = Window:CreateTab("Auto Steal + Filter", "🥚")
-
 local TreadmillSection = TreadmillTab:CreateSection("Auto Treadmill")
 local InstantStealSection = InstantStealTab:CreateSection("Instant Steal")
 local AutoStealSection = AutoStealFilterTab:CreateSection("Auto Steal")
@@ -140,22 +390,11 @@ local function Notify(title, message, duration, kind)
     local now = os.clock()
     if LastNotification == tostring(message) and now - LastNotificationTime < 1 then return end
     LastNotification, LastNotificationTime = tostring(message), now
-    pcall(function()
-        Window:Notify({Title = title, Content = tostring(message), Duration = duration or 2.5, Type = kind or "info"})
-    end)
+    pcall(function() Window:Notify({Title = title, Content = tostring(message), Duration = duration or 2.5, Type = kind or "info"}) end)
 end
-local function EngineError(message)
-    Notify("Engine Error", tostring(message), 4, "error")
-end
-
-local StatusLabel = nil -- status panel intentionally removed from the minimal UI
-
-local function SetStatus(extra)
-    local saved = SavedTreadmillPosition and string.format("%.0f, %.0f, %.0f", SavedTreadmillPosition.X, SavedTreadmillPosition.Y, SavedTreadmillPosition.Z) or "Not saved"
-    local text = "Mode: " .. tostring(CurrentMode) .. "\nTarget: " .. tostring(LastTargetDescription) .. "\nSaved treadmill: " .. saved
-    if extra and extra ~= "" then text = text .. "\n" .. extra end
-    if StatusLabel then pcall(function() StatusLabel:Set("Automation Status", text) end) end
-end
+local function EngineError(message) Notify("Engine Error", tostring(message), 4, "error") end
+local StatusLabel = nil
+local function SetStatus(extra) end
 
 --==============================================================
 -- CHARACTER / POSITION HELPERS
@@ -579,7 +818,7 @@ local function SaveTreadmill(obj)
     SavedTreadmillPosition = GetTreadmillStandPosition(obj) or PositionOf(obj)
     if SavedTreadmillPosition then
         pcall(function()
-            Env.__RageHubSavedTreadmill = {X = SavedTreadmillPosition.X, Y = SavedTreadmillPosition.Y, Z = SavedTreadmillPosition.Z}
+            Env.__SaeBetaSavedTreadmill = {X = SavedTreadmillPosition.X, Y = SavedTreadmillPosition.Y, Z = SavedTreadmillPosition.Z}
         end)
         Notify("Auto Treadmill", "Speed gain detected. Working treadmill saved for respawns.", 3, "success")
         SetStatus("Treadmill accepted after speed test")
@@ -1175,78 +1414,6 @@ end)
 -- AFK / RECONNECT / SMALLEST SERVER / AUTO EXECUTE
 --==============================================================
 
-local function SetAntiAFK(enabled)
-    ANTI_AFK = enabled
-    if AFKConnection then AFKConnection:Disconnect(); AFKConnection = nil end
-    if enabled then
-        AFKConnection = LocalPlayer.Idled:Connect(function()
-            pcall(function()
-                VirtualUser:CaptureController()
-                VirtualUser:ClickButton2(Vector2.new(0, 0))
-            end)
-            Notify("Anti-AFK", "Prevented an idle timeout.", 1.5)
-        end)
-        Notify("Anti-AFK", "Enabled.", 2, "success")
-    else
-        Notify("Anti-AFK", "Disabled.", 2)
-    end
-end
-
-local function HttpGetJson(url)
-    local body
-    if type(request) == "function" then
-        local ok, response = pcall(function() return request({Url = url, Method = "GET"}) end)
-        if ok and response then body = response.Body end
-    end
-    if not body then
-        local ok, result = pcall(function() return game:HttpGet(url) end)
-        if ok then body = result end
-    end
-    if not body then return nil end
-    local ok, decoded = pcall(function() return HttpService:JSONDecode(body) end)
-    return ok and decoded or nil
-end
-
-local function FindSmallestPublicServer()
-    local placeId = game.PlaceId
-    local bestServer, bestPlayers = nil, math.huge
-    local cursor = nil
-    local currentCount = #Players:GetPlayers()
-    for page = 1, MAX_SERVER_PAGES do
-        local url = "https://games.roblox.com/v1/games/" .. tostring(placeId) .. "/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true"
-        if cursor and cursor ~= "" then url = url .. "&cursor=" .. HttpService:UrlEncode(cursor) end
-        local data = HttpGetJson(url)
-        if not data or type(data.data) ~= "table" then break end
-        for _, server in ipairs(data.data) do
-            if server.id and server.id ~= game.JobId and type(server.playing) == "number" and server.playing < (server.maxPlayers or math.huge) then
-                if not bestServer or server.playing < bestPlayers then bestServer, bestPlayers = server, server.playing end
-            end
-        end
-        cursor = data.nextPageCursor
-        if not cursor or cursor == "" then break end
-    end
-    if bestServer then
-        Notify("Server Finder", "Smallest server found: " .. tostring(bestPlayers) .. " players. Teleporting...", 3, "success")
-        local ok, err = pcall(function() TeleportService:TeleportToPlaceInstance(placeId, bestServer.id, LocalPlayer) end)
-        if not ok then EngineError("Server teleport failed: " .. tostring(err)) end
-        return true
-    end
-    EngineError("Couldn't read public server list. HTTP requests or the server API may be blocked.")
-    return false
-end
-
-TeleportService.TeleportInitFailed:Connect(function(player, result, errorMessage)
-    if player ~= LocalPlayer or not AUTO_RECONNECT then return end
-    ReconnectAttempts += 1
-    if ReconnectAttempts > 3 then
-        EngineError("Auto reconnect stopped after 3 failed attempts: " .. tostring(errorMessage))
-        return
-    end
-    Notify("Auto Reconnect", "Teleport failed; retrying in 2 seconds...", 3, "warning")
-    task.delay(2, function()
-        if AUTO_RECONNECT then pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end) end
-    end)
-end)
 
 
 --==============================================================
@@ -1330,12 +1497,8 @@ BiomeFilterSection:CreateDropdown({
     Callback = function(selected) SetSelection(SelectedBiomes, selected) end,
 })
 
--- Settings and server-tool controls intentionally removed from the minimal UI.
-
--- Hosted URL and queue-on-teleport controls intentionally removed.
-
 -- Load saved UI/filter options only; do not request module restoration.
-pcall(function() Window:LoadConfig("autosave", { RestoreModules = false }) end)
+-- Standalone UI: no external library config/module restoration.
 
 --==============================================================
 -- RESPAWN HANDLING
@@ -1360,5 +1523,5 @@ LocalPlayer.CharacterAdded:Connect(function()
     SetStatus()
 end)
 
-Notify("Rage Hub", "Minimal UI loaded: Auto Treadmill, Instant Steal, Auto Steal + Filter.", 4, "success")
+Notify("SaeBeta", "Standalone UI loaded: Auto Treadmill, Instant Steal, Auto Steal + Filter.", 4, "success")
 SetStatus()
