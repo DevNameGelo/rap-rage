@@ -125,18 +125,16 @@ local Window = RageHub:CreateWindow({
     Watermark = true,
 })
 
-local MainTab = Window:CreateTab("Main", "⚡")
-local StealTab = Window:CreateTab("Farm", "🥚")
-local FilterTab = Window:CreateTab("Filters", "🎯")
-local SettingsTab = Window:CreateTab("Settings", "⚙")
+-- Minimal UI: only the three requested tabs are created.
+local TreadmillTab = Window:CreateTab("Auto Treadmill", "🏃")
+local InstantStealTab = Window:CreateTab("Instant Steal", "⚡")
+local AutoStealFilterTab = Window:CreateTab("Auto Steal + Filter", "🥚")
 
-local TreadmillSection = MainTab:CreateSection("Auto Speed Farm")
-local StatusSection = MainTab:CreateSection("Live Monitor")
-local AutoStealSection = StealTab:CreateSection("Automation")
-local RarityFilterSection = FilterTab:CreateSection("Rarity Selector")
-local BiomeFilterSection = FilterTab:CreateSection("Biome Selector")
-local GeneralSettingsSection = SettingsTab:CreateSection("Session Settings")
-local ServerSettingsSection = SettingsTab:CreateSection("Server Tools")
+local TreadmillSection = TreadmillTab:CreateSection("Auto Treadmill")
+local InstantStealSection = InstantStealTab:CreateSection("Instant Steal")
+local AutoStealSection = AutoStealFilterTab:CreateSection("Auto Steal")
+local RarityFilterSection = AutoStealFilterTab:CreateSection("Rarity Filter")
+local BiomeFilterSection = AutoStealFilterTab:CreateSection("Biome Filter")
 
 local function Notify(title, message, duration, kind)
     local now = os.clock()
@@ -150,16 +148,13 @@ local function EngineError(message)
     Notify("Engine Error", tostring(message), 4, "error")
 end
 
-local StatusLabel = StatusSection:CreateParagraph({
-    Title = "Automation Status",
-    Content = "Mode: Idle\nTarget: Waiting for a matching egg...\nTreadmill: Not tested",
-})
+local StatusLabel = nil -- status panel intentionally removed from the minimal UI
 
 local function SetStatus(extra)
     local saved = SavedTreadmillPosition and string.format("%.0f, %.0f, %.0f", SavedTreadmillPosition.X, SavedTreadmillPosition.Y, SavedTreadmillPosition.Z) or "Not saved"
     local text = "Mode: " .. tostring(CurrentMode) .. "\nTarget: " .. tostring(LastTargetDescription) .. "\nSaved treadmill: " .. saved
     if extra and extra ~= "" then text = text .. "\n" .. extra end
-    pcall(function() StatusLabel:Set("Automation Status", text) end)
+    if StatusLabel then pcall(function() StatusLabel:Set("Automation Status", text) end) end
 end
 
 --==============================================================
@@ -586,7 +581,7 @@ local function SaveTreadmill(obj)
         pcall(function()
             Env.__RageHubSavedTreadmill = {X = SavedTreadmillPosition.X, Y = SavedTreadmillPosition.Y, Z = SavedTreadmillPosition.Z}
         end)
-        Notify("Auto Speed Farm", "Speed gain detected. Working treadmill saved for respawns.", 3, "success")
+        Notify("Auto Treadmill", "Speed gain detected. Working treadmill saved for respawns.", 3, "success")
         SetStatus("Treadmill accepted after speed test")
     end
 end
@@ -620,7 +615,7 @@ local function TestTreadmillCandidate(obj, generation)
     if not pos then return end
     LastTargetDescription = "Testing treadmill: " .. obj:GetFullName()
     SetStatus()
-    Notify("Auto Speed Farm", "Testing treadmill for 2 seconds: " .. obj.Name, 2)
+    Notify("Auto Treadmill", "Testing treadmill for 2 seconds: " .. obj.Name, 2)
     local root = Root()
     if not root then EngineError("Character not ready for treadmill test."); return end
 
@@ -653,7 +648,7 @@ local function TestTreadmillCandidate(obj, generation)
                 end
             end
             if not AUTO_TREADMILL or StealBusy or generation ~= TreadmillToken then return end
-            Notify("Auto Speed Farm", "No speed gain in 2 seconds. Trying the next treadmill...", 2, "warning")
+            Notify("Auto Treadmill", "No speed gain in 2 seconds. Trying the next treadmill...", 2, "warning")
             task.wait(TREADMILL_RETRY_DELAY)
             if AUTO_TREADMILL and not StealBusy and generation == TreadmillToken then
                 TreadmillCandidateIndex += 1
@@ -711,7 +706,7 @@ local function ReturnToTreadmill()
             TreadmillToken += 1
             local generation = TreadmillToken
             CurrentMode = "TreadmillReturn"
-            Notify("Auto Speed Farm", "Returning to saved working treadmill...", 2)
+            Notify("Auto Treadmill", "Returning to saved working treadmill...", 2)
             TweenToPosition(pos, 0, "TreadmillReturn", function()
                 if AUTO_TREADMILL and not StealBusy and generation == TreadmillToken then
                     for i, obj in ipairs(TreadmillCandidates) do if obj == saved then TreadmillCandidateIndex = i; break end end
@@ -846,18 +841,18 @@ local function ClickDropAndConfirm(jobToken)
         return false
     end
 
-    Notify("Auto Farm", "Drop GUI found. Clicking and verifying...", 2)
+    Notify("Auto Steal", "Drop GUI found. Clicking and verifying...", 2)
     for attempt = 1, DROP_RETRY_COUNT do
         if not StealBusy or jobToken ~= StealJobToken then return false end
         if not button or not button.Parent or not GuiVisible(button) then
-            Notify("Auto Farm", "Drop confirmed: Drop GUI disappeared.", 2, "success")
+            Notify("Auto Steal", "Drop confirmed: Drop GUI disappeared.", 2, "success")
             return true
         end
         ClickGuiButton(button)
         task.wait(0.35)
         local fresh = FindDropButton()
         if not fresh then
-            Notify("Auto Farm", "Drop confirmed: Drop control is gone.", 2, "success")
+            Notify("Auto Steal", "Drop confirmed: Drop control is gone.", 2, "success")
             return true
         end
         button = fresh
@@ -930,7 +925,7 @@ local function FinishJob(jobToken, message, restart)
     RestoreCharacterState()
     StealBusy = false
     CurrentMode = "Idle"
-    if message then Notify("Auto Farm", message, 2.5) end
+    if message then Notify("Auto Steal", message, 2.5) end
     SetStatus()
     if restart then
         task.delay(POST_STEAL_COOLDOWN, function()
@@ -954,7 +949,7 @@ local function WalkToSpawn(jobToken, lakeStealPrompt)
     hum.WalkSpeed = WALK_TO_SPAWN_SPEED
     local destination = Vector3.new(spawn.Position.X, spawn.Position.Y + 2, spawn.Position.Z)
     hum:MoveTo(destination)
-    Notify("Auto Farm", "Second Steal prompt activated. Walking to spawn at speed 200...", 2)
+    Notify("Auto Steal", "Second Steal prompt activated. Walking to spawn at speed 200...", 2)
     SetStatus()
     task.spawn(function()
         local started = os.clock()
@@ -990,7 +985,7 @@ local function RunStealWorkflow(initialPrompt, initialCandidate, isAutomated)
     local candidate = initialCandidate or GetEggMetadata(initialPrompt)
     LastTargetDescription = string.format("%s · %s · %s", tostring(candidate.Label), tostring(candidate.Rarity), tostring(candidate.Biome))
     SetStatus()
-    Notify("Auto Farm", "Targeting " .. LastTargetDescription, 3, "info")
+    Notify("Auto Steal", "Targeting " .. LastTargetDescription, 3, "info")
 
     local position = GetPromptPosition(initialPrompt)
     if not position then
@@ -1025,7 +1020,7 @@ local function RunStealWorkflow(initialPrompt, initialCandidate, isAutomated)
             local heldInfo = ReadPossibleCarriedEggInfo()
             local wrongEggDetected = heldInfo and IsDetectedCarryWrong(heldInfo, candidate) or false
             if wrongEggDetected then
-                Notify("Auto Farm", "Detected a carried egg that doesn't match the filter. Going to Lake to drop it, then searching again.", 3, "warning")
+                Notify("Auto Steal", "Detected a carried egg that doesn't match the filter. Going to Lake to drop it, then searching again.", 3, "warning")
             end
 
             local lakePoint = FindLakeEggPoint()
@@ -1042,7 +1037,7 @@ local function RunStealWorkflow(initialPrompt, initialCandidate, isAutomated)
                 return
             end
             CurrentMode = "StealToLake"
-            Notify("Auto Farm", "Tweening to Lake Drop point...", 2)
+            Notify("Auto Steal", "Tweening to Lake Drop point...", 2)
             SetStatus()
             TweenToPosition(lakePosition, LAKE_STAND_OFFSET, "StealToLake", function()
                 if not StealBusy or jobToken ~= StealJobToken then return end
@@ -1164,7 +1159,7 @@ task.spawn(function()
             local jumped = lastAirStarted and (os.clock() - lastAirStarted >= 0.15)
             if horizontal > TREADMILL_RETURN_DISTANCE or jumped then
                 if CurrentMode ~= "TreadmillReturn" then
-                    Notify("Auto Speed Farm", "You walked/jumped away. Returning to the saved treadmill...", 2, "warning")
+                    Notify("Auto Treadmill", "You walked/jumped away. Returning to the saved treadmill...", 2, "warning")
                     ReturnToTreadmill()
                 end
             elseif CurrentMode == "Idle" then
@@ -1259,30 +1254,30 @@ end)
 --==============================================================
 
 TreadmillSection:CreateToggle({
-    Name = "Auto Speed Farm", Flag = "AutoTreadmill", Default = false,
+    Name = "Auto Treadmill", Flag = "AutoTreadmill", Default = false,
     Description = "Tests candidates for speed gain every 2 seconds; saves and returns to a working treadmill.",
     Callback = function(on)
         AUTO_TREADMILL = on
         if on then
-            Notify("Auto Speed Farm", "Enabled. Testing treadmills for real speed gain...", 3)
+            Notify("Auto Treadmill", "Enabled. Testing treadmills for real speed gain...", 3)
             if not StealBusy then StartTreadmillSearch() end
         else
             TreadmillToken += 1
             if CurrentMode:find("Treadmill") then CancelTween(); CurrentMode = "Idle"; RestoreCharacterState() end
-            Notify("Auto Speed Farm", "Disabled; no automatic return will run.", 2)
+            Notify("Auto Treadmill", "Disabled; no automatic return will run.", 2)
         end
         SetStatus()
     end,
 })
 
 AutoStealSection:CreateToggle({
-    Name = "Auto Farm", Flag = "AutoSteal", Default = false,
+    Name = "Auto Steal", Flag = "AutoSteal", Default = false,
     Description = "Searches the server for the highest-priority matching egg and runs the Lake Drop workflow.",
     Callback = function(on)
         AUTO_STEAL = on
         if on then
             SetupAllStealPrompts(true)
-            Notify("Auto Farm", "Enabled. Empty filters = highest rarity/value currently visible.", 3, "success")
+            Notify("Auto Steal", "Enabled. Empty filters = highest rarity/value currently visible.", 3, "success")
         else
             if StealBusy then
                 StealJobToken += 1
@@ -1292,19 +1287,19 @@ AutoStealSection:CreateToggle({
                 CurrentMode = "Idle"
             end
             if not MANUAL_INSTANT_STEAL then SetupAllStealPrompts(false) end
-            Notify("Auto Farm", "Disabled.", 2)
+            Notify("Auto Steal", "Disabled.", 2)
         end
         SetStatus()
     end,
 })
 
-AutoStealSection:CreateToggle({
-    Name = "Quick Action", Flag = "ManualInstantSteal", Default = false,
+InstantStealSection:CreateToggle({
+    Name = "Instant Steal", Flag = "ManualInstantSteal", Default = false,
     Description = "When enabled, activating a Steal prompt manually runs the same Lake Drop workflow.",
     Callback = function(on)
         MANUAL_INSTANT_STEAL = on
         if on then SetupAllStealPrompts(true) elseif not AUTO_STEAL then SetupAllStealPrompts(false) end
-        Notify("Quick Action", on and "Enabled." or "Disabled.", 2)
+        Notify("Instant Steal", on and "Enabled." or "Disabled.", 2)
     end,
 })
 
@@ -1335,67 +1330,10 @@ BiomeFilterSection:CreateDropdown({
     Callback = function(selected) SetSelection(SelectedBiomes, selected) end,
 })
 
-GeneralSettingsSection:CreateToggle({
-    Name = "Auto Save", Flag = "AutoSaveConfig", Default = true,
-    Description = "Uses Rage Hub's built-in autosave config for UI toggles and filters.",
-    Callback = function(on)
-        AUTO_SAVE_CONFIG = on
-        Window.AutoSaveName = on and "autosave" or nil
-        if on then pcall(function() Window:SaveConfig("autosave") end) end
-        Notify("Settings", on and "Auto-save enabled." or "Auto-save disabled.", 2)
-    end,
-})
-
-GeneralSettingsSection:CreateButton({
-    Name = "Save Settings", ButtonText = "Save",
-    Callback = function()
-        local ok, err = pcall(function() Window:SaveConfig("autosave") end)
-        if ok then Notify("Settings", "Config saved.", 2, "success") else EngineError("Config save failed: " .. tostring(err)) end
-    end,
-})
-
-GeneralSettingsSection:CreateToggle({
-    Name = "Idle Prevention", Flag = "AntiAFK", Default = false,
-    Description = "Uses the executor-supported VirtualUser idle callback where available.",
-    Callback = SetAntiAFK,
-})
-
-GeneralSettingsSection:CreateToggle({
-    Name = "Reconnect Assist", Flag = "AutoReconnect", Default = false,
-    Description = "Retries failed teleports. A client script cannot recover from every server disconnect by itself.",
-    Callback = function(on)
-        AUTO_RECONNECT = on
-        ReconnectAttempts = 0
-        Notify("Auto Reconnect", on and "Enabled for failed teleport attempts." or "Disabled.", 2)
-    end,
-})
-
-ServerSettingsSection:CreateButton({
-    Name = "Find Low-Pop Server", ButtonText = "Find",
-    Callback = function() task.spawn(FindSmallestPublicServer) end,
-})
-
-ServerSettingsSection:CreateToggle({
-    Name = "Auto Server Finder", Flag = "AutoSmallestServer", Default = false,
-    Description = "Checks every 3 minutes and tries a smaller public server when idle.",
-    Callback = function(on)
-        AUTO_SMALLEST_SERVER = on
-        Notify("Server Finder", on and "Automatic small-server search enabled." or "Automatic server search disabled.", 2)
-    end,
-})
-
-task.spawn(function()
-    while task.wait(180) do
-        if AUTO_SMALLEST_SERVER and not StealBusy then
-            task.spawn(FindSmallestPublicServer)
-        end
-    end
-end)
+-- Settings and server-tool controls intentionally removed from the minimal UI.
 
 -- Hosted URL and queue-on-teleport controls intentionally removed.
 
--- Only the custom Settings tab above is used. Do not create the library's
--- built-in Settings tab, which can expose extra developer-module controls.
 -- Load saved UI/filter options only; do not request module restoration.
 pcall(function() Window:LoadConfig("autosave", { RestoreModules = false }) end)
 
@@ -1414,13 +1352,13 @@ LocalPlayer.CharacterAdded:Connect(function()
     task.wait(1.25)
     if AUTO_STEAL or MANUAL_INSTANT_STEAL then SetupAllStealPrompts(true) end
     if AUTO_STEAL then
-        Notify("Auto Farm", "Respawn detected. Resuming egg search.", 2)
+        Notify("Auto Steal", "Respawn detected. Resuming egg search.", 2)
     elseif AUTO_TREADMILL then
-        Notify("Auto Speed Farm", "Respawn detected. Returning to saved treadmill.", 2)
+        Notify("Auto Treadmill", "Respawn detected. Returning to saved treadmill.", 2)
         ReturnToTreadmill()
     end
     SetStatus()
 end)
 
-Notify("Rage Hub", "Auto Farm + filters loaded. Empty filters prioritize the highest detectable rarity/value.", 4, "success")
+Notify("Rage Hub", "Minimal UI loaded: Auto Treadmill, Instant Steal, Auto Steal + Filter.", 4, "success")
 SetStatus()
