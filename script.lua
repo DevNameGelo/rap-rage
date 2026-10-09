@@ -78,7 +78,6 @@ local MANUAL_INSTANT_STEAL = false
 local ANTI_AFK = false
 local AUTO_RECONNECT = false
 local AUTO_SMALLEST_SERVER = false
-local AUTO_EXECUTE_AFTER_TELEPORT = false
 local AUTO_SAVE_CONFIG = true
 
 local SelectedRarities = {}
@@ -100,7 +99,6 @@ local LastNotification = ""
 local LastNotificationTime = 0
 local AFKConnection = nil
 local ReconnectAttempts = 0
-local SCRIPT_RAW_URL = ""
 local LastTargetDescription = "Waiting for a matching egg..."
 
 local Env = _G
@@ -118,7 +116,7 @@ end
 
 local Window = RageHub:CreateWindow({
     Name = "Rage Hub",
-    Subtitle = "Steal An Egg · Auto Steal",
+    Subtitle = "Steal An Egg · Rage Hub",
     Theme = "Rage",
     Features = { Notifications = true },
     ConfigFolder = "RageHub/StealAnEgg",
@@ -128,18 +126,17 @@ local Window = RageHub:CreateWindow({
 })
 
 local MainTab = Window:CreateTab("Main", "⚡")
-local StealTab = Window:CreateTab("Auto Steal", "🥚")
+local StealTab = Window:CreateTab("Farm", "🥚")
 local FilterTab = Window:CreateTab("Filters", "🎯")
-local SettingsTab = Window:CreateTab("Extra Settings", "⚙")
+local SettingsTab = Window:CreateTab("Settings", "⚙")
 
-local TreadmillSection = MainTab:CreateSection("Auto Treadmill")
-local StatusSection = MainTab:CreateSection("Live Status")
+local TreadmillSection = MainTab:CreateSection("Auto Speed Farm")
+local StatusSection = MainTab:CreateSection("Live Monitor")
 local AutoStealSection = StealTab:CreateSection("Automation")
-local RarityFilterSection = FilterTab:CreateSection("Rarity Filter")
-local BiomeFilterSection = FilterTab:CreateSection("Biome Filter")
+local RarityFilterSection = FilterTab:CreateSection("Rarity Selector")
+local BiomeFilterSection = FilterTab:CreateSection("Biome Selector")
 local GeneralSettingsSection = SettingsTab:CreateSection("Session Settings")
 local ServerSettingsSection = SettingsTab:CreateSection("Server Tools")
-local ExecuteSettingsSection = SettingsTab:CreateSection("Auto Execute")
 
 local function Notify(title, message, duration, kind)
     local now = os.clock()
@@ -589,7 +586,7 @@ local function SaveTreadmill(obj)
         pcall(function()
             Env.__RageHubSavedTreadmill = {X = SavedTreadmillPosition.X, Y = SavedTreadmillPosition.Y, Z = SavedTreadmillPosition.Z}
         end)
-        Notify("Auto Treadmill", "Speed gain detected. Working treadmill saved for respawns.", 3, "success")
+        Notify("Auto Speed Farm", "Speed gain detected. Working treadmill saved for respawns.", 3, "success")
         SetStatus("Treadmill accepted after speed test")
     end
 end
@@ -623,7 +620,7 @@ local function TestTreadmillCandidate(obj, generation)
     if not pos then return end
     LastTargetDescription = "Testing treadmill: " .. obj:GetFullName()
     SetStatus()
-    Notify("Auto Treadmill", "Testing treadmill for 2 seconds: " .. obj.Name, 2)
+    Notify("Auto Speed Farm", "Testing treadmill for 2 seconds: " .. obj.Name, 2)
     local root = Root()
     if not root then EngineError("Character not ready for treadmill test."); return end
 
@@ -656,7 +653,7 @@ local function TestTreadmillCandidate(obj, generation)
                 end
             end
             if not AUTO_TREADMILL or StealBusy or generation ~= TreadmillToken then return end
-            Notify("Auto Treadmill", "No speed gain in 2 seconds. Trying the next treadmill...", 2, "warning")
+            Notify("Auto Speed Farm", "No speed gain in 2 seconds. Trying the next treadmill...", 2, "warning")
             task.wait(TREADMILL_RETRY_DELAY)
             if AUTO_TREADMILL and not StealBusy and generation == TreadmillToken then
                 TreadmillCandidateIndex += 1
@@ -714,7 +711,7 @@ local function ReturnToTreadmill()
             TreadmillToken += 1
             local generation = TreadmillToken
             CurrentMode = "TreadmillReturn"
-            Notify("Auto Treadmill", "Returning to saved working treadmill...", 2)
+            Notify("Auto Speed Farm", "Returning to saved working treadmill...", 2)
             TweenToPosition(pos, 0, "TreadmillReturn", function()
                 if AUTO_TREADMILL and not StealBusy and generation == TreadmillToken then
                     for i, obj in ipairs(TreadmillCandidates) do if obj == saved then TreadmillCandidateIndex = i; break end end
@@ -849,18 +846,18 @@ local function ClickDropAndConfirm(jobToken)
         return false
     end
 
-    Notify("Auto Steal", "Drop GUI found. Clicking and verifying...", 2)
+    Notify("Auto Farm", "Drop GUI found. Clicking and verifying...", 2)
     for attempt = 1, DROP_RETRY_COUNT do
         if not StealBusy or jobToken ~= StealJobToken then return false end
         if not button or not button.Parent or not GuiVisible(button) then
-            Notify("Auto Steal", "Drop confirmed: Drop GUI disappeared.", 2, "success")
+            Notify("Auto Farm", "Drop confirmed: Drop GUI disappeared.", 2, "success")
             return true
         end
         ClickGuiButton(button)
         task.wait(0.35)
         local fresh = FindDropButton()
         if not fresh then
-            Notify("Auto Steal", "Drop confirmed: Drop control is gone.", 2, "success")
+            Notify("Auto Farm", "Drop confirmed: Drop control is gone.", 2, "success")
             return true
         end
         button = fresh
@@ -933,7 +930,7 @@ local function FinishJob(jobToken, message, restart)
     RestoreCharacterState()
     StealBusy = false
     CurrentMode = "Idle"
-    if message then Notify("Auto Steal", message, 2.5) end
+    if message then Notify("Auto Farm", message, 2.5) end
     SetStatus()
     if restart then
         task.delay(POST_STEAL_COOLDOWN, function()
@@ -957,7 +954,7 @@ local function WalkToSpawn(jobToken, lakeStealPrompt)
     hum.WalkSpeed = WALK_TO_SPAWN_SPEED
     local destination = Vector3.new(spawn.Position.X, spawn.Position.Y + 2, spawn.Position.Z)
     hum:MoveTo(destination)
-    Notify("Auto Steal", "Second Steal prompt activated. Walking to spawn at speed 200...", 2)
+    Notify("Auto Farm", "Second Steal prompt activated. Walking to spawn at speed 200...", 2)
     SetStatus()
     task.spawn(function()
         local started = os.clock()
@@ -993,7 +990,7 @@ local function RunStealWorkflow(initialPrompt, initialCandidate, isAutomated)
     local candidate = initialCandidate or GetEggMetadata(initialPrompt)
     LastTargetDescription = string.format("%s · %s · %s", tostring(candidate.Label), tostring(candidate.Rarity), tostring(candidate.Biome))
     SetStatus()
-    Notify("Auto Steal", "Targeting " .. LastTargetDescription, 3, "info")
+    Notify("Auto Farm", "Targeting " .. LastTargetDescription, 3, "info")
 
     local position = GetPromptPosition(initialPrompt)
     if not position then
@@ -1028,7 +1025,7 @@ local function RunStealWorkflow(initialPrompt, initialCandidate, isAutomated)
             local heldInfo = ReadPossibleCarriedEggInfo()
             local wrongEggDetected = heldInfo and IsDetectedCarryWrong(heldInfo, candidate) or false
             if wrongEggDetected then
-                Notify("Auto Steal", "Detected a carried egg that doesn't match the filter. Going to Lake to drop it, then searching again.", 3, "warning")
+                Notify("Auto Farm", "Detected a carried egg that doesn't match the filter. Going to Lake to drop it, then searching again.", 3, "warning")
             end
 
             local lakePoint = FindLakeEggPoint()
@@ -1045,7 +1042,7 @@ local function RunStealWorkflow(initialPrompt, initialCandidate, isAutomated)
                 return
             end
             CurrentMode = "StealToLake"
-            Notify("Auto Steal", "Tweening to Lake Drop point...", 2)
+            Notify("Auto Farm", "Tweening to Lake Drop point...", 2)
             SetStatus()
             TweenToPosition(lakePosition, LAKE_STAND_OFFSET, "StealToLake", function()
                 if not StealBusy or jobToken ~= StealJobToken then return end
@@ -1167,7 +1164,7 @@ task.spawn(function()
             local jumped = lastAirStarted and (os.clock() - lastAirStarted >= 0.15)
             if horizontal > TREADMILL_RETURN_DISTANCE or jumped then
                 if CurrentMode ~= "TreadmillReturn" then
-                    Notify("Auto Treadmill", "You walked/jumped away. Returning to the saved treadmill...", 2, "warning")
+                    Notify("Auto Speed Farm", "You walked/jumped away. Returning to the saved treadmill...", 2, "warning")
                     ReturnToTreadmill()
                 end
             elseif CurrentMode == "Idle" then
@@ -1256,60 +1253,36 @@ TeleportService.TeleportInitFailed:Connect(function(player, result, errorMessage
     end)
 end)
 
-local function GetQueueOnTeleport()
-    if type(queue_on_teleport) == "function" then return queue_on_teleport end
-    if type(queueonteleport) == "function" then return queueonteleport end
-    if type(syn) == "table" and type(syn.queue_on_teleport) == "function" then return syn.queue_on_teleport end
-    return nil
-end
-
-local function QueueAutoExecute()
-    local url = tostring(SCRIPT_RAW_URL or ""):gsub("%s+", "")
-    if url == "" or not url:match("^https?://") then
-        Notify("Auto Execute", "Enter your hosted raw .lua script URL first. The executor cannot auto-execute an unhosted local download.", 5, "warning")
-        return false
-    end
-    local queue = GetQueueOnTeleport()
-    if not queue then
-        Notify("Auto Execute", "This executor has no queue-on-teleport API. Use its Auto Execute folder for startup runs.", 5, "warning")
-        return false
-    end
-    local source = "loadstring(game:HttpGet(" .. string.format("%q", url) .. "))()"
-    local ok, err = pcall(function() queue(source) end)
-    if ok then Notify("Auto Execute", "Queued the hosted script for the next teleport.", 3, "success")
-    else EngineError("Queue failed: " .. tostring(err)) end
-    return ok
-end
 
 --==============================================================
 -- UI CALLBACKS / FILTERS
 --==============================================================
 
 TreadmillSection:CreateToggle({
-    Name = "Auto Treadmill", Flag = "AutoTreadmill", Default = false,
+    Name = "Auto Speed Farm", Flag = "AutoTreadmill", Default = false,
     Description = "Tests candidates for speed gain every 2 seconds; saves and returns to a working treadmill.",
     Callback = function(on)
         AUTO_TREADMILL = on
         if on then
-            Notify("Auto Treadmill", "Enabled. Testing treadmills for real speed gain...", 3)
+            Notify("Auto Speed Farm", "Enabled. Testing treadmills for real speed gain...", 3)
             if not StealBusy then StartTreadmillSearch() end
         else
             TreadmillToken += 1
             if CurrentMode:find("Treadmill") then CancelTween(); CurrentMode = "Idle"; RestoreCharacterState() end
-            Notify("Auto Treadmill", "Disabled; no automatic return will run.", 2)
+            Notify("Auto Speed Farm", "Disabled; no automatic return will run.", 2)
         end
         SetStatus()
     end,
 })
 
 AutoStealSection:CreateToggle({
-    Name = "Auto Steal", Flag = "AutoSteal", Default = false,
+    Name = "Auto Farm", Flag = "AutoSteal", Default = false,
     Description = "Searches the server for the highest-priority matching egg and runs the Lake Drop workflow.",
     Callback = function(on)
         AUTO_STEAL = on
         if on then
             SetupAllStealPrompts(true)
-            Notify("Auto Steal", "Enabled. Empty filters = highest rarity/value currently visible.", 3, "success")
+            Notify("Auto Farm", "Enabled. Empty filters = highest rarity/value currently visible.", 3, "success")
         else
             if StealBusy then
                 StealJobToken += 1
@@ -1319,19 +1292,19 @@ AutoStealSection:CreateToggle({
                 CurrentMode = "Idle"
             end
             if not MANUAL_INSTANT_STEAL then SetupAllStealPrompts(false) end
-            Notify("Auto Steal", "Disabled.", 2)
+            Notify("Auto Farm", "Disabled.", 2)
         end
         SetStatus()
     end,
 })
 
 AutoStealSection:CreateToggle({
-    Name = "Manual Instant Steal", Flag = "ManualInstantSteal", Default = false,
+    Name = "Quick Action", Flag = "ManualInstantSteal", Default = false,
     Description = "When enabled, activating a Steal prompt manually runs the same Lake Drop workflow.",
     Callback = function(on)
         MANUAL_INSTANT_STEAL = on
         if on then SetupAllStealPrompts(true) elseif not AUTO_STEAL then SetupAllStealPrompts(false) end
-        Notify("Manual Instant Steal", on and "Enabled." or "Disabled.", 2)
+        Notify("Quick Action", on and "Enabled." or "Disabled.", 2)
     end,
 })
 
@@ -1349,21 +1322,21 @@ local function SetSelection(target, selected)
 end
 
 RarityFilterSection:CreateDropdown({
-    Name = "Allowed Rarities", Flag = "AllowedRarities", Multi = true, SelectAll = true,
+    Name = "Rarity Selector", Flag = "AllowedRarities", Multi = true, SelectAll = true,
     Options = RARITIES, Default = {}, Search = true,
     Description = "Leave empty to use all rarities and auto-pick the highest-value candidate.",
     Callback = function(selected) SetSelection(SelectedRarities, selected) end,
 })
 
 BiomeFilterSection:CreateDropdown({
-    Name = "Allowed Biomes", Flag = "AllowedBiomes", Multi = true, SelectAll = true,
+    Name = "Biome Selector", Flag = "AllowedBiomes", Multi = true, SelectAll = true,
     Options = BIOMES, Default = {}, Search = true,
     Description = "Select one or more biomes. With Divine + Eternal and two biomes selected, only those matches qualify.",
     Callback = function(selected) SetSelection(SelectedBiomes, selected) end,
 })
 
 GeneralSettingsSection:CreateToggle({
-    Name = "Auto Save Config", Flag = "AutoSaveConfig", Default = true,
+    Name = "Auto Save", Flag = "AutoSaveConfig", Default = true,
     Description = "Uses Rage Hub's built-in autosave config for UI toggles and filters.",
     Callback = function(on)
         AUTO_SAVE_CONFIG = on
@@ -1374,7 +1347,7 @@ GeneralSettingsSection:CreateToggle({
 })
 
 GeneralSettingsSection:CreateButton({
-    Name = "Save Config Now", ButtonText = "Save",
+    Name = "Save Settings", ButtonText = "Save",
     Callback = function()
         local ok, err = pcall(function() Window:SaveConfig("autosave") end)
         if ok then Notify("Settings", "Config saved.", 2, "success") else EngineError("Config save failed: " .. tostring(err)) end
@@ -1382,13 +1355,13 @@ GeneralSettingsSection:CreateButton({
 })
 
 GeneralSettingsSection:CreateToggle({
-    Name = "Anti AFK", Flag = "AntiAFK", Default = false,
+    Name = "Idle Prevention", Flag = "AntiAFK", Default = false,
     Description = "Uses the executor-supported VirtualUser idle callback where available.",
     Callback = SetAntiAFK,
 })
 
 GeneralSettingsSection:CreateToggle({
-    Name = "Auto Reconnect", Flag = "AutoReconnect", Default = false,
+    Name = "Reconnect Assist", Flag = "AutoReconnect", Default = false,
     Description = "Retries failed teleports. A client script cannot recover from every server disconnect by itself.",
     Callback = function(on)
         AUTO_RECONNECT = on
@@ -1398,12 +1371,12 @@ GeneralSettingsSection:CreateToggle({
 })
 
 ServerSettingsSection:CreateButton({
-    Name = "Find Smallest Server", ButtonText = "Find",
+    Name = "Find Low-Pop Server", ButtonText = "Find",
     Callback = function() task.spawn(FindSmallestPublicServer) end,
 })
 
 ServerSettingsSection:CreateToggle({
-    Name = "Auto Find Smallest Server", Flag = "AutoSmallestServer", Default = false,
+    Name = "Auto Server Finder", Flag = "AutoSmallestServer", Default = false,
     Description = "Checks every 3 minutes and tries a smaller public server when idle.",
     Callback = function(on)
         AUTO_SMALLEST_SERVER = on
@@ -1419,40 +1392,7 @@ task.spawn(function()
     end
 end)
 
-ExecuteSettingsSection:CreateInput({
-    Name = "Hosted Raw Script URL", Flag = "HostedRawScriptURL", Default = "", Width = 300,
-    Placeholder = "https://raw.githubusercontent.com/user/repo/main/script.lua", Clearable = true,
-    Description = "Optional: host THIS script first, then paste its raw URL here.",
-    Callback = function(value)
-        SCRIPT_RAW_URL = tostring(value or "")
-        if AUTO_EXECUTE_AFTER_TELEPORT and SCRIPT_RAW_URL ~= "" then
-            task.defer(QueueAutoExecute)
-        end
-    end,
-})
-
-ExecuteSettingsSection:CreateToggle({
-    Name = "Auto Execute After Teleport", Flag = "AutoExecuteAfterTeleport", Default = false,
-    Description = "Queues the hosted raw script on teleport if the executor supports queue_on_teleport.",
-    Callback = function(on)
-        AUTO_EXECUTE_AFTER_TELEPORT = on
-        if on then
-            QueueAutoExecute()
-        else
-            Notify("Auto Execute", "Disabled.", 2)
-        end
-    end,
-})
-
-ExecuteSettingsSection:CreateButton({
-    Name = "Queue Script For Next Teleport", ButtonText = "Queue",
-    Callback = QueueAutoExecute,
-})
-
-ExecuteSettingsSection:CreateParagraph({
-    Title = "Startup Auto-Execute",
-    Content = "For automatic execution every time you join Roblox, use your executor's own Auto Execute/autoexec feature. This in-game script cannot enable that executor setting itself.",
-})
+-- Hosted URL and queue-on-teleport controls intentionally removed.
 
 -- Only the custom Settings tab above is used. Do not create the library's
 -- built-in Settings tab, which can expose extra developer-module controls.
@@ -1474,13 +1414,13 @@ LocalPlayer.CharacterAdded:Connect(function()
     task.wait(1.25)
     if AUTO_STEAL or MANUAL_INSTANT_STEAL then SetupAllStealPrompts(true) end
     if AUTO_STEAL then
-        Notify("Auto Steal", "Respawn detected. Resuming egg search.", 2)
+        Notify("Auto Farm", "Respawn detected. Resuming egg search.", 2)
     elseif AUTO_TREADMILL then
-        Notify("Auto Treadmill", "Respawn detected. Returning to saved treadmill.", 2)
+        Notify("Auto Speed Farm", "Respawn detected. Returning to saved treadmill.", 2)
         ReturnToTreadmill()
     end
     SetStatus()
 end)
 
-Notify("Rage Hub", "Auto Steal + filters loaded. Empty filters prioritize the highest detectable rarity/value.", 4, "success")
+Notify("Rage Hub", "Auto Farm + filters loaded. Empty filters prioritize the highest detectable rarity/value.", 4, "success")
 SetStatus()
