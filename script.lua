@@ -1454,10 +1454,10 @@ ExecuteSettingsSection:CreateParagraph({
     Content = "For automatic execution every time you join Roblox, use your executor's own Auto Execute/autoexec feature. This in-game script cannot enable that executor setting itself.",
 })
 
--- Built-in RageHub settings/config tab.
-pcall(function() Window:CreateSettingsTab() end)
--- Load saved options after all user controls exist; callbacks restore their states.
-pcall(function() Window:LoadConfig() end)
+-- Only the custom Settings tab above is used. Do not create the library's
+-- built-in Settings tab, which can expose extra developer-module controls.
+-- Load saved UI/filter options only; do not request module restoration.
+pcall(function() Window:LoadConfig("autosave", { RestoreModules = false }) end)
 
 --==============================================================
 -- RESPAWN HANDLING
