@@ -1,1338 +1,1200 @@
---// Rage Hub · Steal An Egg (v6 · safe startup)
---// Built for RageHub v1.0.0 UI API.
---// Every automation toggle starts OFF and is never saved/restored. Risky extras are opt-in.
---// Research note: live community egg/biome catalogues change frequently; the scanner
---// prefers rarity/biome/egg metadata actually replicated in the current server.
---// If the game does not expose a label/attribute, the script cannot reliably infer it.
+--// Rage Hub · Steal An Egg · v7
+--// Tabs: Steal | Player | Others (+ Rage Hub's built-in Settings tab)
+--//
+--// SAFE STARTUP: when you execute this, it only builds the UI. Nothing moves, nothing connects
+--// to game remotes, and every toggle is OFF. Each feature starts working only when YOU turn it on,
+--// and toggles are never saved/restored.
+--//
+--// Game facts used (from your dump + remote spy):
+--//   Steal prompt     : workspace.SmartPromptPart.<CarryAreaEgg>  (ActionText "Steal")
+--//   Lake drop point  : workspace.World.Areas.GuardAreas.Lake.RequiredSpeedSign.Support
+--//   Drop button      : PlayerGui.DropHeldEgg.Button
+--//   Spawn            : workspace.SpawnLocation
+--//   Your treadmill   : workspace.Plots.<your plot>.TreadmillBottom  (plot sign shows your name)
+--//   Treadmill remotes: RF/Treadmill/AskWearStill, RF/Treadmill/AskDoff, RE/Treadmill/RenderStateShifted
+--//   Egg data (live)  : RE/EggWorld/FieldEggShifted / FieldEggGone / FieldEggCarry (AreaId = biome)
 
-local RAGEHUB_URL = "https://raw.githubusercontent.com/devnamegelo/Rage-Hub/main/RageHub.lua"
-local RageHub = loadstring(game:HttpGet(RAGEHUB_URL))()
+local RageHub = loadstring(game:HttpGet(
+    "https://raw.githubusercontent.com/devnamegelo/Rage-Hub/main/RageHub.lua"
+))()
+
+--==============================================================
+-- SERVICES
+--==============================================================
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local TeleportService = game:GetService("TeleportService")
+local GuiService = game:GetService("GuiService")
 local ProximityPromptService = game:GetService("ProximityPromptService")
 
 local LocalPlayer = Players.LocalPlayer
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 --==============================================================
--- CONFIG / GAME REFERENCES
+-- CONSTANTS
 --==============================================================
 
-local TREADMILL_TEST_SECONDS = 2
-local TREADMILL_RETRY_DELAY = 0.3
-local TREADMILL_RETURN_DISTANCE = 10
-local TREADMILL_STAND_OFFSET = 3
-local TRAVEL_SPEED = 500
-local EGG_STAND_OFFSET = 3
-local LAKE_STAND_OFFSET = 3
-local LAKE_DROP_CONFIRM_TIMEOUT = 8
-local WALK_TO_SPAWN_SPEED = 200
-local TARGET_SCAN_INTERVAL = 1.1
-local POST_STEAL_COOLDOWN = 2.5
-local NextStealAllowedAt = 0
-local LastTreadmillSearchAt = 0
-local DROP_RETRY_COUNT = 5
+local RARITIES = { "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Cosmic", "Secret", "Eternal", "Divine", "OG" }
+local RARITY_RANK = {}
+for i, name in ipairs(RARITIES) do RARITY_RANK[name] = i end
 
+-- AreaId values seen in FieldEggShifted + the GuardAreas folder in your dump.
+-- ("Enchanted Temple" in your message = "Enchanted Forest" here; "Titan Temple" is its own biome.)
 local BIOMES = {
-    "Forest", "Lake", "Desert", "Jungle", "Snow", "Volcano",
-    "Abyss Ocean", "Prehistoric", "Cosmic", "Cherry Blossom",
-    "Titan Temple", "Angels and Demons", "Enchanted Forest",
+    "Forest", "Lake", "Desert", "Jungle", "Snow", "Volcano", "Abyss Ocean", "Prehistoric",
+    "Cosmic", "Cherry Blossom", "Titan Temple", "Light Dark", "Enchanted Forest",
 }
 
--- Higher numeric rank = higher priority. Exact rarity filtering uses exact labels.
-local RARITY_RANK = {
-    Unknown = 0, Common = 1, Uncommon = 2, Rare = 3, Epic = 4,
-    Legendary = 5, Mythic = 6, Cosmic = 7, Secret = 8,
-    Eternal = 9, Divine = 10, OG = 11,
-}
-local RARITIES = {"OG", "Divine", "Eternal", "Secret", "Cosmic", "Mythic", "Legendary", "Epic", "Rare", "Uncommon", "Common"}
-
--- Known named pulls documented in recent community guides. These are fallbacks only;
--- runtime rarity labels/attributes take priority over this table.
-local KNOWN_RARITY_BY_NAME = {
-    ["ice dragon"] = "Eternal", ["phoenix"] = "Eternal", ["lava dragon"] = "Eternal",
-    ["el maja"] = "Eternal", ["mosasaurus"] = "Eternal", ["pegasus"] = "Eternal",
-    ["eternal lunar dragon"] = "Eternal", ["oni tiger"] = "Eternal", ["gorilla king"] = "Eternal",
-    ["skeleton horse"] = "Eternal", ["equinox"] = "Eternal", ["pink dragon experiment"] = "Eternal",
-    ["archangel"] = "Divine", ["world burner"] = "Divine", ["aetheron"] = "Divine",
-    ["unicorn"] = "Divine", ["kitsune"] = "Divine", ["nightflame"] = "Divine",
-    ["mecha scrambler"] = "Divine", ["spirit world guardian"] = "Divine",
-    ["cerberus"] = "Secret", ["king snake"] = "Secret", ["yeti"] = "Secret",
-    ["tralaledon"] = "Secret", ["t-rex"] = "Secret", ["trex"] = "Secret",
-    ["kraken"] = "Secret", ["cosmic dragon"] = "Secret", ["cosmic skeleton boss"] = "Secret",
-    ["stag"] = "Secret", ["mutant shark"] = "Secret", ["pure jellyfish"] = "Secret",
-    ["centaur"] = "Secret", ["gargoyle"] = "Secret", ["razorfang"] = "Secret",
-    ["royal sphinx"] = "Cosmic", ["king mammoth"] = "Cosmic", ["holy peacock"] = "Cosmic",
-    ["whale shark"] = "Cosmic", ["beluga whale"] = "Cosmic", ["mantaris"] = "Cosmic",
-    ["rhinotaur"] = "Cosmic", ["sacred moth"] = "Cosmic", ["demon hound"] = "Cosmic",
+-- Only used if the game's own asset module can't be read.
+local NAME_RARITY_FALLBACK = {
+    { "eternal lunar dragon", "Eternal" }, { "el maja", "Eternal" }, { "oni tiger", "Eternal" },
+    { "gorilla king", "Eternal" }, { "pegasus", "Eternal" }, { "skeleton horse", "Eternal" },
+    { "void dragon", "Eternal" }, { "equinox", "Eternal" },
+    { "unicorn", "Divine" }, { "kitsune", "Divine" }, { "nightflame", "Divine" }, { "archangel", "Divine" },
+    { "world burner", "Divine" }, { "aetheron", "Divine" },
 }
 
-local AUTO_TREADMILL = false
-local AUTO_STEAL = false
-local MANUAL_INSTANT_STEAL = false
-local BOOST_WALK = false          -- OFF by default: changing WalkSpeed is easy for a game to notice
-local WalkBoosted = false
-local USE_AUTOSAVE = false        -- OFF by default: nothing is restored when the script starts
+--==============================================================
+-- SETTINGS / STATE  (everything automation-related starts OFF)
+--==============================================================
 
-local SelectedRarities = {}
-local SelectedBiomes = {}
-local CurrentMode = "Idle"
-local StealBusy = false
-local StealJobToken = 0
-local TweenToken = 0
-local TreadmillToken = 0
-local ActiveTween = nil
-local OriginalWalkSpeed = nil
-local OriginalAutoRotate = nil
-local SavedTreadmill = nil
-local SavedTreadmillPosition = nil
-local TreadmillCandidates = {}
-local TreadmillCandidateIndex = 0
-local LastAttemptTime = setmetatable({}, {__mode = "k"})
-local LastNotification = ""
-local LastNotificationTime = 0
-local LastTargetDescription = "Waiting for a matching egg..."
+local CFG = {
+    TravelSpeed = 500,        -- studs/s for tween trips
+    SpawnWalkSpeed = 300,     -- WalkSpeed while walking to SpawnLocation (your request)
+    SupportOffset = 3,        -- stand this many studs above the Lake support part
+    PlayerSpeed = 100,        -- Player tab walk speed (only used when its toggle is on)
+}
 
-local Env = _G
-pcall(function() if type(getgenv) == "function" then Env = getgenv() end end)
-if type(Env.__RageHubSavedTreadmill) == "table" then
-    local saved = Env.__RageHubSavedTreadmill
-    if type(saved.X) == "number" and type(saved.Y) == "number" and type(saved.Z) == "number" then
-        SavedTreadmillPosition = Vector3.new(saved.X, saved.Y, saved.Z)
+local InstantSteal = false
+local AutoSteal = false
+local AutoTreadmill = false
+local SpeedAdjust = false
+local InfiniteJump = false
+local Noclip = false
+local AntiRagdoll = false
+local AntiFling = false
+
+local SelectedRarities = {}   -- set; empty = any
+local SelectedBiomes = {}     -- set; empty = any
+local Priority = "Highest Rarity"
+
+local Unloaded = false
+local Busy = false
+local Job = 0                 -- bump to cancel whatever is running
+local Worn = false            -- true while you are on the treadmill (from RenderStateShifted)
+local Carrying = false        -- true while holding an egg (from FieldEggCarry)
+local LastTriggered = 0       -- os.clock() of your last prompt trigger
+local SpeedOverride = false   -- true while the script is walking you to spawn
+local TreadmillRetryAt = 0
+
+local Window, StatusLabel
+local Connections = {}
+local OriginalHold = setmetatable({}, { __mode = "k" })
+local Eggs = {}               -- Uid -> egg record from the server
+local RarityCache = {}
+local AttemptedUntil = {}     -- Uid -> os.clock() until which we skip that egg
+
+local function Track(conn)
+    if conn then table.insert(Connections, conn) end
+    return conn
+end
+
+--==============================================================
+-- UI HELPERS
+--==============================================================
+
+local function Notify(title, content, kind, duration)
+    pcall(function()
+        if Window then
+            Window:Notify({ Title = title, Content = content, Type = kind or "info", Duration = duration or 3 })
+        end
+    end)
+end
+
+local function SetStatus(text)
+    if StatusLabel then
+        pcall(function() StatusLabel:Set("Status: " .. tostring(text)) end)
     end
 end
 
 --==============================================================
--- UI
+-- CHARACTER HELPERS
 --==============================================================
 
-local Window = RageHub:CreateWindow({
-    Name = "Rage Hub",
-    Subtitle = "Steal An Egg",
-    Theme = "Rage",
-    Features = { Notifications = true },
-    ConfigFolder = "RageHub/StealAnEgg_v6",
-    AutoSave = USE_AUTOSAVE and "autosave" or nil,
-    Splash = true,
-})
-
-local MainTab = Window:CreateTab("Main", "⚡")
-local StealTab = Window:CreateTab("Auto Steal", "🥚")
-local FilterTab = Window:CreateTab("Filters", "🎯")
-local OtherTab = Window:CreateTab("Other", "🧰")
-
-local TreadmillSection = MainTab:CreateSection("Auto Treadmill")
-local StatusSection = MainTab:CreateSection("Live Status")
-local AutoStealSection = StealTab:CreateSection("Automation")
-local RarityFilterSection = FilterTab:CreateSection("Egg Rarity")
-local BiomeFilterSection = FilterTab:CreateSection("Biome Filter")
-local MovementSection = OtherTab:CreateSection("Movement")
-local ToolsSection = OtherTab:CreateSection("Tools")
-
-local function Notify(title, message, duration, kind)
-    local now = os.clock()
-    if LastNotification == tostring(message) and now - LastNotificationTime < 1 then return end
-    LastNotification, LastNotificationTime = tostring(message), now
-    pcall(function()
-        Window:Notify({Title = title, Content = tostring(message), Duration = duration or 2.5, Type = kind or "info"})
-    end)
-end
-local function EngineError(message)
-    Notify("Engine Error", tostring(message), 4, "error")
-end
-
-local StatusLabel = StatusSection:CreateParagraph({
-    Title = "Automation Status",
-    Content = "Mode: Idle\nTarget: Waiting for a matching egg...\nTreadmill: Not tested",
-})
-
-local function SetStatus(extra)
-    local saved = SavedTreadmillPosition and string.format("%.0f, %.0f, %.0f", SavedTreadmillPosition.X, SavedTreadmillPosition.Y, SavedTreadmillPosition.Z) or "Not saved"
-    local text = "Mode: " .. tostring(CurrentMode) .. "\nTarget: " .. tostring(LastTargetDescription) .. "\nSaved treadmill: " .. saved
-    if extra and extra ~= "" then text = text .. "\n" .. extra end
-    pcall(function() StatusLabel:Set("Automation Status", text) end)
-end
-
---==============================================================
--- CHARACTER / POSITION HELPERS
---==============================================================
-
-local function Character() return LocalPlayer.Character end
-local function Humanoid()
-    local c = Character()
-    return c and c:FindFirstChildOfClass("Humanoid")
-end
+local function Char() return LocalPlayer.Character end
 local function Root()
-    local c = Character()
+    local c = Char()
     return c and c:FindFirstChild("HumanoidRootPart")
 end
-local function SafeGetPivot(model)
-    local ok, cf = pcall(function() return model:GetPivot() end)
-    return ok and cf or nil
-end
-local function PositionOf(obj)
-    if not obj then return nil end
-    if obj:IsA("BasePart") then return obj.Position end
-    if obj:IsA("Attachment") then return obj.WorldPosition end
-    if obj:IsA("Model") then
-        local cf = SafeGetPivot(obj)
-        return cf and cf.Position or nil
-    end
-    return nil
-end
-local function Distance(a, b)
-    return a and b and (a - b).Magnitude or math.huge
+local function Hum()
+    local c = Char()
+    return c and c:FindFirstChildOfClass("Humanoid")
 end
 
-local function RememberCharacterState()
-    local h = Humanoid()
-    if not h then return end
-    if OriginalWalkSpeed == nil then OriginalWalkSpeed = h.WalkSpeed end
-    if OriginalAutoRotate == nil then OriginalAutoRotate = h.AutoRotate end
-end
-local function RestoreCharacterState()
-    local h = Humanoid()
-    if h then
-        if WalkBoosted and OriginalWalkSpeed ~= nil then pcall(function() h.WalkSpeed = OriginalWalkSpeed end) end
-        WalkBoosted = false
-    end
-    OriginalWalkSpeed, OriginalAutoRotate = nil, nil
+local function Lower(s) return string.lower(tostring(s or "")) end
+
+local function Cancelled(id)
+    return Unloaded or id ~= Job
 end
 
-local function CancelTween()
-    TweenToken += 1
-    if ActiveTween then
-        pcall(function() ActiveTween:Cancel() end)
-        ActiveTween = nil
-    end
+local function NewJob()
+    Job += 1
+    return Job
 end
 
-local function TweenToPosition(targetPosition, offset, mode, callback, speed)
-    local root, hum = Root(), Humanoid()
-    if not root or not hum then EngineError("Character or HumanoidRootPart not ready."); return false end
-    if typeof(targetPosition) ~= "Vector3" then EngineError("Target position was invalid."); return false end
-
-    CancelTween()
-    RememberCharacterState()
-
-    local destination = Vector3.new(targetPosition.X, targetPosition.Y + (offset or 0), targetPosition.Z)
-    local goal = CFrame.new(destination) * root.CFrame.Rotation
-    local distance = (root.Position - destination).Magnitude
-    local duration = math.clamp(distance / math.max(1, speed or TRAVEL_SPEED), 0.18, 8)
-    local myToken = TweenToken
-    CurrentMode = mode or "TweenTravel"
-    SetStatus()
-
-    local tween = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out), {CFrame = goal})
-    ActiveTween = tween
-    tween.Completed:Connect(function(playbackState)
-        if myToken ~= TweenToken then return end
-        if ActiveTween == tween then ActiveTween = nil end
-        if playbackState ~= Enum.PlaybackState.Completed then return end
-        if callback then
-            local ok, err = pcall(callback)
-            if not ok then EngineError("Tween callback failed: " .. tostring(err)) end
-        end
-    end)
-    tween:Play()
-    return true
+local function Net(name)
+    local pk = ReplicatedStorage:FindFirstChild("Packages")
+    local nw = pk and pk:FindFirstChild("Networking")
+    return nw and nw:FindFirstChild(name)
 end
 
---==============================================================
--- RARITY / BIOME / VALUE IDENTIFICATION
---==============================================================
-
-local function Normalize(s)
-    s = string.lower(tostring(s or ""))
-    s = s:gsub("[%p%c]", " "):gsub("%s+", " ")
-    return s
-end
-
-local function GetKnownRarity(text)
-    local n = Normalize(text)
-    -- Check whole tier tokens in priority order; OG outranks Divine.
-    for _, rarity in ipairs({"OG", "Divine", "Eternal", "Secret", "Cosmic", "Mythic", "Legendary", "Epic", "Rare", "Uncommon", "Common"}) do
-        local token = string.lower(rarity)
-        if n:match("%f[%a]" .. token .. "%f[%A]") then return rarity end
-    end
-    for knownName, rarity in pairs(KNOWN_RARITY_BY_NAME) do
-        if n:find(knownName, 1, true) then return rarity end
-    end
-    return "Unknown"
-end
-
-local function GetBiomeFromText(text)
-    local n = Normalize(text)
-    local aliases = {
-        {"Angels and Demons", {"angels and demons", "angels vs demons", "angel and demon", "angel biome", "demon biome", "darkness biome", "light biome"}},
-        {"Abyss Ocean", {"abyss ocean", "abyss", "deep ocean"}},
-        {"Cherry Blossom", {"cherry blossom", "sakura"}},
-        {"Titan Temple", {"titan temple", "titan"}},
-        {"Enchanted Forest", {"enchanted forest", "enchanted tree"}},
-        {"Prehistoric", {"prehistoric", "dinosaur"}},
-        {"Volcano", {"volcano", "volcanic"}},
-        {"Desert", {"desert", "sand biome"}},
-        {"Jungle", {"jungle"}}, {"Forest", {"forest"}}, {"Lake", {"lake"}},
-        {"Snow", {"snow", "ice biome"}}, {"Cosmic", {"cosmic", "space biome"}},
-    }
-    for _, record in ipairs(aliases) do
-        for _, alias in ipairs(record[2]) do
-            if n:find(alias, 1, true) then return record[1] end
-        end
-    end
-    return "Unknown"
-end
-
-local function IsStealPrompt(prompt)
-    if not prompt or not prompt:IsA("ProximityPrompt") then return false end
-    local n = Normalize(prompt.Name .. " " .. prompt.ActionText .. " " .. prompt.ObjectText)
-    return n:find("steal", 1, true) ~= nil
-end
-
-local function GetPromptPosition(prompt)
-    if not prompt then return nil end
-    local p = prompt.Parent
-    if p and p:IsA("Attachment") then return p.WorldPosition end
-    if p and p:IsA("BasePart") then return p.Position end
-    if p and p:IsA("Model") then return PositionOf(p) end
-    local current = p
-    for _ = 1, 5 do
-        if not current then break end
-        local pos = PositionOf(current)
-        if pos then return pos end
-        current = current.Parent
-    end
+local function WaitFor(fn, timeout, id)
+    local t0 = os.clock()
+    repeat
+        if Cancelled(id) then return nil end
+        local v = fn()
+        if v then return v end
+        task.wait(0.1)
+    until os.clock() - t0 >= timeout
     return nil
 end
 
-local function GetPromptContainer(prompt)
-    local current = prompt and prompt.Parent
-    local fallbackModel = nil
-    for _ = 1, 5 do
-        if not current or current == workspace then break end
-        if current:IsA("Model") then
-            if not fallbackModel then fallbackModel = current end
-            local n = Normalize(current.Name)
-            if n:find("egg", 1, true) or n:find("pet", 1, true) or n:find("nest", 1, true) then
-                return current
-            end
-        end
-        current = current.Parent
-    end
-    -- Prefer the prompt's own part/attachment for position and local labels; a shared Guard model
-    -- may contain several eggs and must not be treated as one candidate.
-    return (prompt and prompt.Parent) or fallbackModel
-end
-
-local function AppendAttributes(parts, obj)
-    if not obj then return end
-    local ok, attrs = pcall(function() return obj:GetAttributes() end)
-    if ok and type(attrs) == "table" then
-        for key, value in pairs(attrs) do
-            local keyNorm = Normalize(key)
-            if keyNorm:find("rarity", 1, true) or keyNorm:find("tier", 1, true) or keyNorm:find("biome", 1, true)
-                or keyNorm:find("egg", 1, true) or keyNorm:find("pet", 1, true) or keyNorm:find("value", 1, true)
-                or keyNorm:find("price", 1, true) or keyNorm:find("income", 1, true) or keyNorm:find("weight", 1, true)
-                or keyNorm:find("worth", 1, true) then
-                table.insert(parts, tostring(key) .. " " .. tostring(value))
-            end
-        end
-    end
-end
-
-local function GetEggMetadata(prompt)
-    local parts, containers = {}, {}
-    local function add(v) if v ~= nil and tostring(v) ~= "" then table.insert(parts, tostring(v)) end end
-    add(prompt.Name); add(prompt.ActionText); add(prompt.ObjectText)
-    local current = prompt
-    for _ = 1, 7 do
-        if not current or current == workspace then break end
-        containers[#containers + 1] = current
-        add(current.Name)
-        AppendAttributes(parts, current)
-        if current:IsA("StringValue") or current:IsA("IntValue") or current:IsA("NumberValue") then add(current.Value) end
-        current = current.Parent
-    end
-
-    local container = GetPromptContainer(prompt)
-    if container then
-        -- Inspect only a limited number of descendants to capture Billboard/Surface labels without scanning the whole map.
-        local inspected = 0
-        for _, desc in ipairs(container:GetDescendants()) do
-            inspected += 1
-            if inspected > 100 then break end
-            if desc:IsA("TextLabel") or desc:IsA("TextButton") then
-                if desc.Visible then add(desc.Text) end
-            elseif desc:IsA("StringValue") or desc:IsA("IntValue") or desc:IsA("NumberValue") then
-                local k = Normalize(desc.Name)
-                if k:find("rarity", 1, true) or k:find("tier", 1, true) or k:find("egg", 1, true) or k:find("pet", 1, true)
-                    or k:find("value", 1, true) or k:find("price", 1, true) or k:find("income", 1, true) or k:find("weight", 1, true) then
-                    add(desc.Name); add(desc.Value)
-                end
-            end
-            AppendAttributes(parts, desc)
-        end
-    end
-
-    local combined = table.concat(parts, " | ")
-    local rarity = GetKnownRarity(combined)
-    local biome = GetBiomeFromText(combined)
-    local label = prompt.ObjectText
-    if label == nil or Normalize(label) == "" or Normalize(label) == "egg" or Normalize(label) == "steal" then
-        label = (container and container.Name) or prompt.Parent.Name
-    end
-    local value, size = 0, 0
-    for _, obj in ipairs(containers) do
-        local ok, attrs = pcall(function() return obj:GetAttributes() end)
-        if ok and type(attrs) == "table" then
-            for key, raw in pairs(attrs) do
-                if type(raw) == "number" then
-                    local k = Normalize(key)
-                    if k:find("value", 1, true) or k:find("price", 1, true) or k:find("income", 1, true)
-                        or k:find("worth", 1, true) or k:find("cash", 1, true) or k:find("money", 1, true)
-                        or k:find("weight", 1, true) then value = math.max(value, raw) end
-                end
-            end
-        end
-    end
-    if container then
-        pcall(function()
-            if container:IsA("Model") then
-                local _, boxSize = container:GetBoundingBox()
-                size = boxSize.X * boxSize.Y * boxSize.Z
-            elseif container:IsA("BasePart") then
-                size = container.Size.X * container.Size.Y * container.Size.Z
-            end
-        end)
-        pcall(function()
-            local inspected = 0
-            for _, desc in ipairs(container:GetDescendants()) do
-                inspected += 1
-                if inspected > 100 then break end
-                if desc:IsA("NumberValue") or desc:IsA("IntValue") then
-                    local k = Normalize(desc.Name)
-                    if k:find("value", 1, true) or k:find("price", 1, true) or k:find("income", 1, true)
-                        or k:find("worth", 1, true) or k:find("cash", 1, true) or k:find("money", 1, true) or k:find("weight", 1, true) then
-                        value = math.max(value, desc.Value)
-                    end
-                end
-            end
-        end)
-    end
-    return {
-        Prompt = prompt,
-        Container = container,
-        Position = GetPromptPosition(prompt),
-        Label = tostring(label or "Unknown egg"),
-        MetadataText = combined,
-        Rarity = rarity,
-        Biome = biome,
-        Rank = RARITY_RANK[rarity] or 0,
-        Value = value,
-        Size = size,
-    }
-end
-
-local function HasAny(set)
-    return type(set) == "table" and next(set) ~= nil
-end
-local function MatchesFilters(candidate)
-    if not candidate then return false end
-    if HasAny(SelectedRarities) then
-        if candidate.Rarity == "Unknown" or not SelectedRarities[candidate.Rarity] then return false end
-    end
-    if HasAny(SelectedBiomes) then
-        if candidate.Biome == "Unknown" or not SelectedBiomes[candidate.Biome] then return false end
-    end
-    return true
-end
-
-local function CandidateCooldownActive(prompt)
-    local last = LastAttemptTime[prompt]
-    return last and (os.clock() - last) < 12
-end
-
-local function CandidateBetter(a, b, rootPosition)
-    if not b then return true end
-    if a.Rank ~= b.Rank then return a.Rank > b.Rank end
-    if a.Value ~= b.Value then return a.Value > b.Value end
-    if a.Size ~= b.Size then return a.Size > b.Size end
-    local da = rootPosition and Distance(a.Position, rootPosition) or math.huge
-    local db = rootPosition and Distance(b.Position, rootPosition) or math.huge
-    return da < db
-end
-
-local function FindBestEggCandidate()
-    local root = Root()
-    local candidates = {}
-    local seen = {}
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("ProximityPrompt") and obj.Enabled and IsStealPrompt(obj) then
-            local candidate = GetEggMetadata(obj)
-            if candidate.Position and not CandidateCooldownActive(obj) and MatchesFilters(candidate) then
-                -- Keep each live prompt separate: several nests may share a Guard model.
-                if not seen[obj] then
-                    seen[obj] = true
-                    table.insert(candidates, candidate)
-                end
-            end
-        end
-    end
-    local best
-    for _, candidate in ipairs(candidates) do
-        if CandidateBetter(candidate, best, root and root.Position or nil) then best = candidate end
-    end
-    return best, #candidates
-end
-
 --==============================================================
--- TREADMILL DISCOVERY / SPEED PROOF
+-- MOVEMENT (straight-line tween, verified arrival)
 --==============================================================
 
-local function IsTreadmill(obj)
-    local n = Normalize(obj and obj.Name)
-    return n:find("treadmill", 1, true) ~= nil or n:find("tread mill", 1, true) ~= nil
-end
-local function FindTreadmills()
-    local found, seen = {}, {}
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if IsTreadmill(obj) and (obj:IsA("BasePart") or obj:IsA("Model")) then
-            local rootObj = obj
-            local parent = obj.Parent
-            while parent and parent ~= workspace do
-                if parent:IsA("Model") and IsTreadmill(parent) then rootObj = parent end
-                parent = parent.Parent
-            end
-            if not seen[rootObj] and PositionOf(rootObj) then
-                seen[rootObj] = true
-                table.insert(found, rootObj)
-            end
-        end
-    end
-    local root = Root()
-    if root then
-        table.sort(found, function(a, b) return Distance(PositionOf(a), root.Position) < Distance(PositionOf(b), root.Position) end)
-    end
-    return found
-end
+local function TweenTo(pos, id)
+    local started = os.clock()
+    while os.clock() - started < 90 do
+        if Cancelled(id) then return false end
+        local r = Root()
+        if not r then return false end
 
-local function GetTreadmillStandPosition(obj)
-    if not obj then return nil end
-    if obj:IsA("BasePart") then
-        return obj.Position + Vector3.new(0, obj.Size.Y / 2 + TREADMILL_STAND_OFFSET, 0)
-    elseif obj:IsA("Model") then
-        local ok, cf, size = pcall(function() return obj:GetBoundingBox() end)
-        if ok and cf and size then return cf.Position + Vector3.new(0, size.Y / 2 + TREADMILL_STAND_OFFSET, 0) end
-    end
-    local pos = PositionOf(obj)
-    return pos and (pos + Vector3.new(0, TREADMILL_STAND_OFFSET, 0)) or nil
-end
+        local offset = pos - r.Position
+        local dist = offset.Magnitude
+        if dist <= 2 then return true end
 
-local function ReadSpeedCounters()
-    local values = {}
-    local function scan(container, prefix)
-        if not container then return end
-        local descendants = {}
-        pcall(function() descendants = container:GetDescendants() end)
-        for _, obj in ipairs(descendants) do
-            local n = Normalize(obj.Name)
-            if (n == "speed" or n == "walk speed" or n == "walkspeed" or n == "steps" or n == "power" or n == "total speed")
-                and (obj:IsA("NumberValue") or obj:IsA("IntValue")) then
-                values[prefix .. obj:GetFullName()] = obj.Value
-            end
-        end
-    end
-    scan(LocalPlayer:FindFirstChild("leaderstats"), "leader:")
-    scan(LocalPlayer:FindFirstChild("Data"), "data:")
-    scan(LocalPlayer:FindFirstChild("Stats"), "stats:")
-    scan(LocalPlayer, "player:")
-    for _, container in ipairs({LocalPlayer, Character(), Humanoid()}) do
-        if container then
-            local ok, attrs = pcall(function() return container:GetAttributes() end)
-            if ok and type(attrs) == "table" then
-                for key, val in pairs(attrs) do
-                    local n = Normalize(key)
-                    if type(val) == "number" and (n == "speed" or n == "steps" or n == "power" or n == "walkspeed" or n == "walk speed") then
-                        values["attr:" .. container:GetFullName() .. ":" .. key] = val
-                    end
-                end
-            end
-        end
-    end
-    return values
-end
+        local dt = RunService.Heartbeat:Wait()
+        r = Root()
+        if not r then return false end
 
-local function CounterIncreased(before, after)
-    for key, value in pairs(after) do
-        if before[key] ~= nil and value > before[key] then return true, key end
+        local step = math.min(CFG.TravelSpeed * dt, dist)
+        r.CFrame = CFrame.new(r.Position + offset.Unit * step) * r.CFrame.Rotation
+        r.AssemblyLinearVelocity = Vector3.zero
     end
     return false
 end
 
-local function SaveTreadmill(obj)
-    SavedTreadmill = obj
-    SavedTreadmillPosition = GetTreadmillStandPosition(obj) or PositionOf(obj)
-    if SavedTreadmillPosition then
-        pcall(function()
-            Env.__RageHubSavedTreadmill = {X = SavedTreadmillPosition.X, Y = SavedTreadmillPosition.Y, Z = SavedTreadmillPosition.Z}
-        end)
-        Notify("Auto Treadmill", "Speed gain detected. Working treadmill saved for respawns.", 3, "success")
-        SetStatus("Treadmill accepted after speed test")
+-- "100%": keep going until we really are within 2 studs (up to 3 attempts)
+local function TweenVerified(pos, id)
+    for _ = 1, 3 do
+        if TweenTo(pos, id) then return true end
+        if Cancelled(id) then return false end
     end
+    return false
 end
 
-local function StopTreadmillTask()
-    TreadmillToken += 1
-    if CurrentMode:find("Treadmill") then
-        CancelTween()
-        CurrentMode = "Idle"
-    end
+local function DesiredWalkSpeed()
+    return SpeedAdjust and CFG.PlayerSpeed or 16
 end
 
-local function FindClosestTreadmillToSaved(candidates)
-    if SavedTreadmill and SavedTreadmill.Parent then
-        for _, obj in ipairs(candidates) do if obj == SavedTreadmill then return obj end end
+local function WalkToSpawn(id)
+    local spawn = workspace:FindFirstChild("SpawnLocation")
+    local hum = Hum()
+    if not spawn or not hum then
+        Notify("Steal", "SpawnLocation or Humanoid not found.", "error")
+        return false
     end
-    if not SavedTreadmillPosition then return nil end
-    local best, bestDistance
-    for _, obj in ipairs(candidates) do
-        local pos = GetTreadmillStandPosition(obj) or PositionOf(obj)
-        local d = pos and Distance(pos, SavedTreadmillPosition) or math.huge
-        if not best or d < bestDistance then best, bestDistance = obj, d end
+
+    local original = hum.WalkSpeed
+    SpeedOverride = true
+    hum.WalkSpeed = CFG.SpawnWalkSpeed
+    SetStatus("Walking to SpawnLocation (" .. CFG.SpawnWalkSpeed .. ")")
+
+    local target = Vector3.new(spawn.Position.X, spawn.Position.Y + 2, spawn.Position.Z)
+    local arrived = false
+    local t0 = os.clock()
+
+    while os.clock() - t0 < 45 do
+        if Cancelled(id) then break end
+        local r, h = Root(), Hum()
+        if not r or not h then break end
+        if (r.Position - target).Magnitude <= 6 then arrived = true; break end
+        h:MoveTo(target)       -- re-issued; MoveTo times out after a few seconds
+        task.wait(0.2)
+    end
+
+    SpeedOverride = false
+    local h = Hum()
+    if h then
+        h.WalkSpeed = SpeedAdjust and CFG.PlayerSpeed or original
+    end
+    return arrived
+end
+
+--==============================================================
+-- PROMPTS / GUI
+--==============================================================
+
+local function IsStealPrompt(p)
+    if not p or not p:IsA("ProximityPrompt") then return false end
+    return string.find(Lower(p.ActionText), "steal", 1, true) ~= nil
+        or string.find(Lower(p.Name), "carryareaegg", 1, true) ~= nil
+end
+
+local function PromptPosition(p)
+    local parent = p.Parent
+    if parent and parent:IsA("BasePart") then return parent.Position end
+    if parent and parent:IsA("Attachment") then return parent.WorldPosition end
+    return nil
+end
+
+local function FindNearbyStealPrompt(range)
+    local r = Root()
+    if not r then return nil end
+    local best, bestDist = nil, range
+    for _, holder in ipairs(workspace:GetChildren()) do
+        if holder.Name == "SmartPromptPart" then
+            for _, p in ipairs(holder:GetChildren()) do
+                if p:IsA("ProximityPrompt") and p.Enabled and IsStealPrompt(p) then
+                    local pos = PromptPosition(p)
+                    local d = pos and (pos - r.Position).Magnitude
+                    if d and d < bestDist then best, bestDist = p, d end
+                end
+            end
+        end
     end
     return best
 end
 
-local StartTreadmillSearch
-local function TestTreadmillCandidate(obj, generation)
-    if not AUTO_TREADMILL or StealBusy or generation ~= TreadmillToken then return end
-    local pos = GetTreadmillStandPosition(obj)
-    if not pos then return end
-    LastTargetDescription = "Testing treadmill: " .. obj:GetFullName()
-    SetStatus()
-    Notify("Auto Treadmill", "Testing treadmill for 2 seconds: " .. obj.Name, 2)
-    local root = Root()
-    if not root then EngineError("Character not ready for treadmill test."); return end
-
-    local function beginTest()
-        if not AUTO_TREADMILL or StealBusy or generation ~= TreadmillToken then return end
-        local before = ReadSpeedCounters()
-        local startWalkSpeed = (Humanoid() and Humanoid().WalkSpeed) or 16
-        local hadCounter = next(before) ~= nil
-        local start = os.clock()
-        CurrentMode = "TreadmillTesting"
-        SetStatus()
-        task.spawn(function()
-            while AUTO_TREADMILL and not StealBusy and generation == TreadmillToken and os.clock() - start < TREADMILL_TEST_SECONDS do
-                task.wait(0.2)
-                local r, h = Root(), Humanoid()
-                if not r or not h then return end
-                local after = ReadSpeedCounters()
-                local gained = CounterIncreased(before, after)
-                local walkSpeedGained = h.WalkSpeed > startWalkSpeed
-                local horizontalSpeed = Vector3.new(r.AssemblyLinearVelocity.X, 0, r.AssemblyLinearVelocity.Z).Magnitude
-                -- If the actual game speed counter is visible, require its gain or a real WalkSpeed increase.
-                -- Only use movement as fallback when the game exposes no recognized speed stat.
-                local fallbackMovement = (not hadCounter) and horizontalSpeed >= 8
-                if gained or walkSpeedGained or fallbackMovement then
-                    SaveTreadmill(obj)
-                    CurrentMode = "Treadmill"
-                    RestoreCharacterState()
-                    SetStatus(hadCounter and "Speed counter changed" or "No readable counter; movement fallback accepted")
-                    return
-                end
-            end
-            if not AUTO_TREADMILL or StealBusy or generation ~= TreadmillToken then return end
-            Notify("Auto Treadmill", "No speed gain in 2 seconds. Trying the next treadmill...", 2, "warning")
-            task.wait(TREADMILL_RETRY_DELAY)
-            if AUTO_TREADMILL and not StealBusy and generation == TreadmillToken then
-                TreadmillCandidateIndex += 1
-                if TreadmillCandidateIndex > #TreadmillCandidates then
-                    TreadmillCandidates = FindTreadmills()
-                    TreadmillCandidateIndex = 1
-                end
-                local nextObj = TreadmillCandidates[TreadmillCandidateIndex]
-                if nextObj then TestTreadmillCandidate(nextObj, generation)
-                else EngineError("No objects named Treadmill were found."); CurrentMode = "Idle" end
-            end
-        end)
+local function FirePrompt(p)
+    if fireproximityprompt then
+        if pcall(fireproximityprompt, p) then return true end
     end
-
-    local distance = Distance(root.Position, pos)
-    if distance > 8 then
-        TweenToPosition(pos, 0, "TreadmillTravel", function()
-            if AUTO_TREADMILL and not StealBusy and generation == TreadmillToken then beginTest() end
-        end, TRAVEL_SPEED)
-    else
-        beginTest()
-    end
+    return pcall(function()
+        p:InputHoldBegin()
+        task.wait(math.max(0.1, p.HoldDuration) + 0.05)
+        p:InputHoldEnd()
+    end)
 end
 
-StartTreadmillSearch = function()
-    if not AUTO_TREADMILL or StealBusy then return end
-    TreadmillToken += 1
-    local generation = TreadmillToken
-    TreadmillCandidates = FindTreadmills()
-    if #TreadmillCandidates == 0 then
-        CurrentMode = "Idle"
-        EngineError("No objects named Treadmill found. If the game uses a different object name, treadmill auto-detection needs that path.")
-        return
+local function GuiVisible(obj)
+    local cur = obj
+    while cur and cur ~= game do
+        if cur:IsA("GuiObject") and not cur.Visible then return false end
+        if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+        cur = cur.Parent
     end
-    local preferred = FindClosestTreadmillToSaved(TreadmillCandidates)
-    if preferred then
-        for i, obj in ipairs(TreadmillCandidates) do if obj == preferred then TreadmillCandidateIndex = i; break end end
-    else
-        TreadmillCandidateIndex = 1
-    end
-    TestTreadmillCandidate(TreadmillCandidates[TreadmillCandidateIndex], generation)
+    return obj and obj.AbsoluteSize.X > 0
 end
 
-local function ReturnToTreadmill()
-    if not AUTO_TREADMILL or StealBusy then return end
-    TreadmillCandidates = FindTreadmills()
-    if #TreadmillCandidates == 0 then
-        StartTreadmillSearch()
-        return
+local function GetDropButton()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local gui = pg and pg:FindFirstChild("DropHeldEgg")
+    local btn = gui and gui:FindFirstChild("Button")
+    if btn and GuiVisible(btn) then return btn end
+    return nil
+end
+
+local function ClickGui(btn)
+    if not btn or not btn.Parent then return false end
+    if firesignal then
+        local ok = pcall(function() firesignal(btn.Activated) end)
+        if not ok then ok = pcall(function() firesignal(btn.MouseButton1Click) end) end
+        if ok then return true end
     end
-    local saved = FindClosestTreadmillToSaved(TreadmillCandidates)
-    if saved then
-        local pos = GetTreadmillStandPosition(saved)
-        if pos then
-            TreadmillToken += 1
-            local generation = TreadmillToken
-            CurrentMode = "TreadmillReturn"
-            Notify("Auto Treadmill", "Returning to saved working treadmill...", 2)
-            TweenToPosition(pos, 0, "TreadmillReturn", function()
-                if AUTO_TREADMILL and not StealBusy and generation == TreadmillToken then
-                    for i, obj in ipairs(TreadmillCandidates) do if obj == saved then TreadmillCandidateIndex = i; break end end
-                    TestTreadmillCandidate(saved, generation)
-                end
-            end, TRAVEL_SPEED)
-            return
-        end
-    end
-    StartTreadmillSearch()
+    return pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        local inset = GuiService:GetGuiInset()
+        local c = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+        vim:SendMouseButtonEvent(c.X, c.Y, 0, true, game, 0)
+        task.wait(0.05)
+        vim:SendMouseButtonEvent(c.X, c.Y, 0, false, game, 0)
+    end)
 end
 
 --==============================================================
--- DROP GUI / CARRY INFO
+-- INSTANT STEAL: hold duration 0.1 (restored when turned off)
 --==============================================================
 
-local function GuiVisible(gui)
-    if not gui or not gui.Parent then return false end
-    local current = gui
-    while current and current ~= PlayerGui do
-        if current:IsA("GuiObject") and not current.Visible then return false end
-        if current:IsA("ScreenGui") and not current.Enabled then return false end
-        current = current.Parent
-    end
-    return true
+local function ApplyFast(p)
+    if not InstantSteal or not IsStealPrompt(p) then return end
+    if OriginalHold[p] == nil then OriginalHold[p] = p.HoldDuration end
+    if p.HoldDuration ~= 0.1 then p.HoldDuration = 0.1 end
 end
 
-local function GuiButtonText(button)
-    local pieces = {tostring(button.Name)}
-    if button:IsA("TextButton") then table.insert(pieces, tostring(button.Text)) end
-    for _, child in ipairs(button:GetDescendants()) do
-        if child:IsA("TextLabel") or child:IsA("TextButton") then table.insert(pieces, tostring(child.Text)) end
-    end
-    return table.concat(pieces, " ")
-end
-
-local function FindDropButton()
-    for _, obj in ipairs(PlayerGui:GetDescendants()) do
-        if obj:IsA("GuiButton") and GuiVisible(obj) then
-            local text = Normalize(GuiButtonText(obj))
-            if text:match("%f[%a]drop%f[%A]") or text == "drop" then return obj end
+local function ApplyFastToAll()
+    for _, holder in ipairs(workspace:GetChildren()) do
+        if holder.Name == "SmartPromptPart" then
+            for _, p in ipairs(holder:GetChildren()) do
+                if p:IsA("ProximityPrompt") then ApplyFast(p) end
+            end
         end
+    end
+end
+
+local function RestoreHolds()
+    for p, old in pairs(OriginalHold) do
+        if p and p.Parent then pcall(function() p.HoldDuration = old end) end
+        OriginalHold[p] = nil
+    end
+end
+
+--==============================================================
+-- LAKE DROP WORKFLOW
+--   Steal clicked -> tween to Lake support -> wait 0.5 -> Drop -> wait for Steal prompt
+--   -> click Steal -> walk to SpawnLocation.  Stops (no spawn walk) if any step isn't confirmed.
+--==============================================================
+
+local function GetSupport()
+    local ok, part = pcall(function()
+        return workspace.World.Areas.GuardAreas.Lake.RequiredSpeedSign.Support
+    end)
+    return ok and part or nil
+end
+
+local function Fail(msg)
+    SetStatus(msg)
+    Notify("Steal", msg, "warning", 4)
+    return false
+end
+
+local function RunDropWorkflow(id)
+    local support = GetSupport()
+    if not support then return Fail("Lake support part not found. Stopped.") end
+
+    -- 1) tween to the support
+    SetStatus("Tweening to Lake support")
+    if not TweenVerified(support.Position + Vector3.new(0, CFG.SupportOffset, 0), id) then
+        return Fail("Could not reach the Lake support. Stopped.")
+    end
+
+    -- 2) stop 0.5s
+    SetStatus("Stopped at support (0.5s)")
+    task.wait(0.5)
+    if Cancelled(id) then return false end
+
+    -- 3) Drop (HUD button) and confirm it really dropped
+    local btn = WaitFor(GetDropButton, 5, id)
+    if not btn then return Fail("Drop button did not appear. Stopped (no spawn walk).") end
+
+    local dropped = false
+    local wasCarrying = Carrying
+    for _ = 1, 4 do
+        SetStatus("Clicking Drop")
+        ClickGui(btn)
+        task.wait(0.4)
+        -- confirmed only if the Drop button is gone, or the game says you stopped carrying
+        if not GetDropButton() or (wasCarrying and not Carrying) then dropped = true; break end
+        btn = GetDropButton() or btn
+    end
+    if not dropped then return Fail("Drop not confirmed. Stopped (no spawn walk).") end
+
+    -- 4) wait for the Steal prompt of the dropped egg, then click it
+    SetStatus("Waiting for Steal prompt")
+    local prompt = WaitFor(function() return FindNearbyStealPrompt(14) end, 8, id)
+    if not prompt then return Fail("Steal prompt did not show after Drop. Stopped (no spawn walk).") end
+
+    local stolen = false
+    for _ = 1, 4 do
+        local before = os.clock()
+        SetStatus("Clicking Steal")
+        FirePrompt(prompt)
+        local ok = WaitFor(function()
+            return LastTriggered >= before or Carrying or GetDropButton() ~= nil or not prompt.Parent or not prompt.Enabled
+        end, 1.5, id)
+        if ok then stolen = true; break end
+        prompt = FindNearbyStealPrompt(14) or prompt
+    end
+    if not stolen then return Fail("Second Steal not confirmed. Stopped (no spawn walk).") end
+
+    -- 5) walk to SpawnLocation
+    local arrived = WalkToSpawn(id)
+    if arrived then
+        SetStatus("Done: reached SpawnLocation")
+        Notify("Steal", "Cycle complete.", "success", 2)
+    else
+        SetStatus("Spawn walk interrupted")
+    end
+    return arrived
+end
+
+--==============================================================
+-- TREADMILL (your own plot only)
+--==============================================================
+
+local function GetMyPlot()
+    local plots = workspace:FindFirstChild("Plots")
+    if not plots then return nil end
+
+    local n1, n2 = Lower(LocalPlayer.Name), Lower(LocalPlayer.DisplayName)
+
+    for _, plot in ipairs(plots:GetChildren()) do
+        local sign = plot:FindFirstChild("PlotSign")
+        local label = sign and sign:FindFirstChild("PlayerName", true)
+        if label and label:IsA("TextLabel") then
+            local t = Lower(label.Text)
+            if t == n1 or t == n2 then return plot end
+        end
+    end
+
+    -- fallback: this model only exists in your own plot
+    for _, plot in ipairs(plots:GetChildren()) do
+        if plot:FindFirstChild("LocalOfflineMoneyClaim") then return plot end
     end
     return nil
 end
 
-local function ReadPossibleCarriedEggInfo()
-    local parts = {}
-    local function add(s) if s ~= nil and tostring(s) ~= "" then table.insert(parts, tostring(s)) end end
-    local containers = {LocalPlayer, Character()}
-    for _, c in ipairs(containers) do
-        if c then
-            local ok, attrs = pcall(function() return c:GetAttributes() end)
-            if ok and type(attrs) == "table" then
-                for key, value in pairs(attrs) do
-                    local k = Normalize(key)
-                    if k:find("carry", 1, true) or k:find("holding", 1, true) or k:find("current egg", 1, true)
-                        or k:find("egg name", 1, true) or k:find("held egg", 1, true) or k:find("rarity", 1, true) then
-                        add(key); add(value)
-                    end
-                end
-            end
-            for _, desc in ipairs(c:GetDescendants()) do
-                if desc:IsA("Tool") or desc:IsA("Model") then
-                    local n = Normalize(desc.Name)
-                    if n:find("egg", 1, true) or n:find("carry", 1, true) or n:find("hold", 1, true) then add(desc.Name); AppendAttributes(parts, desc) end
-                end
-            end
-        end
+local function GetTreadmillSpot()
+    local plot = GetMyPlot()
+    local part = plot and plot:FindFirstChild("TreadmillBottom")
+    if part and part:IsA("BasePart") then
+        return part.Position + Vector3.new(0, 3.1, 0)
     end
-    -- Some versions expose held egg details in a Drop/Carry/Egg GUI. Avoid reading all unrelated Rage Hub labels.
-    for _, gui in ipairs(PlayerGui:GetChildren()) do
-        if gui:IsA("ScreenGui") and (Normalize(gui.Name):find("drop", 1, true) or Normalize(gui.Name):find("carry", 1, true) or Normalize(gui.Name):find("egg", 1, true)) then
-            if gui.Enabled then
-                for _, desc in ipairs(gui:GetDescendants()) do
-                    if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and GuiVisible(desc) then add(desc.Text) end
-                end
-            end
-        end
-    end
-    local text = table.concat(parts, " | ")
-    local rarity = GetKnownRarity(text)
-    local biome = GetBiomeFromText(text)
-    local normalized = Normalize(text)
-    if normalized == "" or (not normalized:find("egg", 1, true) and rarity == "Unknown" and biome == "Unknown") then return nil end
-    return {Text = text, Rarity = rarity, Biome = biome}
+    return nil
 end
 
-local function IsDetectedCarryWrong(held, target)
-    if not held or not target then return false end
-    -- Only declare a mismatch when the UI exposes a positive, specific clue.
-    if HasAny(SelectedRarities) and held.Rarity ~= "Unknown" and not SelectedRarities[held.Rarity] then return true end
-    if HasAny(SelectedBiomes) and held.Biome ~= "Unknown" and not SelectedBiomes[held.Biome] then return true end
-    if target.Rarity ~= "Unknown" and held.Rarity ~= "Unknown" and target.Rarity ~= held.Rarity then return true end
-    return false
+local function GetOffTreadmill()
+    if not Worn then return end
+    local rf = Net("RF/Treadmill/AskDoff")
+    if rf and rf:IsA("RemoteFunction") then
+        pcall(function() rf:InvokeServer() end)
+    end
+    Worn = false
 end
 
-local function ClickGuiButton(button)
-    if not button or not button.Parent then return false end
-    local sent = false
-    if type(firesignal) == "function" then
-        local ok = pcall(function() firesignal(button.Activated) end)
-        sent = ok
-        if not sent and button:IsA("TextButton") then
-            ok = pcall(function() firesignal(button.MouseButton1Click) end)
-            sent = ok
-        end
+local function GoToTreadmill(id)
+    local spot = GetTreadmillSpot()
+    if not spot then
+        Notify("Auto Treadmill", "Could not find your plot/treadmill.", "error", 4)
+        return false
     end
-    if sent then return true end
-    local ok = pcall(function()
-        local vim = game:GetService("VirtualInputManager")
-        local center = button.AbsolutePosition + button.AbsoluteSize / 2
-        vim:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
-        task.wait(0.05)
-        vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
-    end)
+
+    SetStatus("Tweening to your treadmill")
+    if not TweenVerified(spot, id) then return false end
+    task.wait(0.4)
+    if Cancelled(id) then return false end
+
+    local rf = Net("RF/Treadmill/AskWearStill")
+    if not rf or not rf:IsA("RemoteFunction") then
+        Notify("Auto Treadmill", "RF/Treadmill/AskWearStill not found.", "error", 4)
+        return false
+    end
+
+    local ok, result = pcall(function() return rf:InvokeServer() end)
+    if not ok then
+        Notify("Auto Treadmill", "AskWearStill failed: " .. tostring(result), "error", 4)
+        return false
+    end
+
+    Worn = true
+    SetStatus("On treadmill, waiting")
+    return true
+end
+
+--==============================================================
+-- LIVE EGG DATA (passive listeners, connected only when needed)
+--==============================================================
+
+local ListenersOn = false
+
+local function IngestEgg(rec, depth)
+    if type(rec) ~= "table" or (depth or 0) > 3 then return end
+    if type(rec.Uid) == "string" then
+        Eggs[rec.Uid] = rec
+        return
+    end
+    for _, v in pairs(rec) do
+        if type(v) == "table" then IngestEgg(v, (depth or 0) + 1) end
+    end
+end
+
+local function EnsureListeners()
+    if ListenersOn then return end
+    ListenersOn = true
+
+    local render = Net("RE/Treadmill/RenderStateShifted")
+    if render then
+        Track(render.OnClientEvent:Connect(function(plr, worn)
+            if plr == LocalPlayer then Worn = worn == true end
+        end))
+    end
+
+    local carry = Net("RE/EggWorld/FieldEggCarry")
+    if carry then
+        Track(carry.OnClientEvent:Connect(function(data)
+            if type(data) == "table" then Carrying = data.IsCarrying == true end
+        end))
+    end
+
+    local shifted = Net("RE/EggWorld/FieldEggShifted")
+    if shifted then Track(shifted.OnClientEvent:Connect(function(rec) IngestEgg(rec, 0) end)) end
+
+    local batch = Net("RE/EggWorld/FieldEggBatchShifted")
+    if batch then Track(batch.OnClientEvent:Connect(function(data) IngestEgg(data, 0) end)) end
+
+    local gone = Net("RE/EggWorld/FieldEggGone")
+    if gone then
+        Track(gone.OnClientEvent:Connect(function(uid)
+            if type(uid) == "string" then Eggs[uid] = nil end
+        end))
+    end
+
+    Track(ProximityPromptService.PromptTriggered:Connect(function(prompt, plr)
+        if plr ~= LocalPlayer then return end
+        LastTriggered = os.clock()
+
+        -- Instant Steal: one click on a Steal prompt runs the Lake workflow
+        if InstantSteal and not Busy and IsStealPrompt(prompt) then
+            Busy = true
+            local id = NewJob()
+            task.spawn(function()
+                local ok, err = pcall(RunDropWorkflow, id)
+                if not ok then Notify("Steal", "Workflow error: " .. tostring(err), "error", 4) end
+                Busy = false
+            end)
+        end
+    end))
+
+    -- Instant Steal: shorten hold time on prompts as they appear
+    Track(ProximityPromptService.PromptShown:Connect(function(prompt)
+        if InstantSteal then ApplyFast(prompt) end
+    end))
+end
+
+local function RefreshSnapshot()
+    local rf = Net("RF/EggWorld/AskFieldEggSnapshot")
+    if not rf or not rf:IsA("RemoteFunction") then return false end
+    local ok, result = pcall(function() return rf:InvokeServer() end)
+    if ok then IngestEgg(result, 0) end
     return ok
 end
 
-local function ClickDropAndConfirm(jobToken)
-    local deadline = os.clock() + LAKE_DROP_CONFIRM_TIMEOUT
-    local button
-    repeat
-        if not StealBusy or jobToken ~= StealJobToken then return false end
-        button = FindDropButton()
-        if button then break end
-        task.wait(0.1)
-    until os.clock() >= deadline
+--==============================================================
+-- EGG RARITY / FILTERS
+--==============================================================
 
-    if not button then
-        EngineError("Drop GUI did not appear at Lake. Workflow stopped; no spawn walk will happen.")
+local function MatchRarityName(value)
+    local v = Lower(value)
+    for _, name in ipairs(RARITIES) do
+        if Lower(name) == v then return name end
+    end
+    return nil
+end
+
+local function ResolveRarity(category)
+    if type(category) ~= "string" then return nil end
+    if RarityCache[category] ~= nil then return RarityCache[category] or nil end
+
+    local found
+    pcall(function()
+        local data = ReplicatedStorage:FindFirstChild("Data")
+        local assets = data and data:FindFirstChild("Assets")
+        local mod = assets and assets:FindFirstChild(category)
+        if mod and mod:IsA("ModuleScript") then
+            local ok, t = pcall(require, mod)
+            if ok and type(t) == "table" then
+                local r = t.Rarity or t.rarity or t.Tier
+                if type(r) ~= "string" and type(t.Info) == "table" then r = t.Info.Rarity end
+                if type(r) == "string" then found = MatchRarityName(r) end
+            end
+        end
+    end)
+
+    if not found then
+        local n = Lower(category)
+        for _, pair in ipairs(NAME_RARITY_FALLBACK) do
+            if string.find(n, pair[1], 1, true) then found = pair[2]; break end
+        end
+    end
+
+    RarityCache[category] = found or false
+    return found
+end
+
+local function HasAny(set) return next(set) ~= nil end
+
+local function EggPosition(rec)
+    local cf = rec.BottomCFrame or rec.BoundsCFrame
+    return typeof(cf) == "CFrame" and cf.Position or nil
+end
+
+local function EvaluateEgg(rec)
+    if rec.State ~= "Slot" then return nil end
+    local pos = EggPosition(rec)
+    if not pos then return nil end
+
+    local rarity = ResolveRarity(rec.AssetCategory)
+    if HasAny(SelectedRarities) and (not rarity or not SelectedRarities[rarity]) then return nil end
+    if HasAny(SelectedBiomes) and not SelectedBiomes[tostring(rec.AreaId)] then return nil end
+
+    return {
+        Uid = rec.Uid, Pos = pos, Rarity = rarity, Rank = rarity and RARITY_RANK[rarity] or 0,
+        Area = tostring(rec.AreaId), Category = tostring(rec.AssetCategory), Size = tonumber(rec.AssetScale) or 0,
+    }
+end
+
+local function PickBestEgg()
+    local r = Root()
+    if not r then return nil end
+
+    local best, count = nil, 0
+    for uid, rec in pairs(Eggs) do
+        if (AttemptedUntil[uid] or 0) < os.clock() then
+            local e = EvaluateEgg(rec)
+            if e then
+                count += 1
+                e.Dist = (e.Pos - r.Position).Magnitude
+                local better = false
+                if not best then
+                    better = true
+                elseif Priority == "Nearest" then
+                    better = e.Dist < best.Dist
+                elseif Priority == "Biggest Size" then
+                    better = e.Size > best.Size or (e.Size == best.Size and e.Dist < best.Dist)
+                else
+                    better = e.Rank > best.Rank or (e.Rank == best.Rank and e.Dist < best.Dist)
+                end
+                if better then best = e end
+            end
+        end
+    end
+    return best, count
+end
+
+--==============================================================
+-- AUTO STEAL (filtered)
+--==============================================================
+
+local function RunAutoSteal(egg, id)
+    SetStatus(string.format("Going to %s egg (%s, %s)", egg.Rarity or "?", egg.Category, egg.Area))
+    Notify("Auto Steal", string.format("%s · %s · %s", egg.Rarity or "?", egg.Category, egg.Area), "info", 3)
+
+    AttemptedUntil[egg.Uid] = os.clock() + 25   -- don't retry the same egg right away
+
+    GetOffTreadmill()
+
+    if not TweenVerified(egg.Pos + Vector3.new(0, 3, 0), id) then return false end
+
+    local live = Eggs[egg.Uid]
+    if not live or live.State ~= "Slot" then
+        SetStatus("Egg was taken before I arrived")
         return false
     end
 
-    Notify("Auto Steal", "Drop GUI found. Clicking and verifying...", 2)
-    for attempt = 1, DROP_RETRY_COUNT do
-        if not StealBusy or jobToken ~= StealJobToken then return false end
-        if not button or not button.Parent or not GuiVisible(button) then
-            Notify("Auto Steal", "Drop confirmed: Drop GUI disappeared.", 2, "success")
-            return true
-        end
-        ClickGuiButton(button)
-        task.wait(0.35)
-        local fresh = FindDropButton()
-        if not fresh then
-            Notify("Auto Steal", "Drop confirmed: Drop control is gone.", 2, "success")
-            return true
-        end
-        button = fresh
-    end
-    EngineError("Could not confirm the Drop action. Staying at Lake; spawn walk cancelled.")
-    return false
+    local prompt = WaitFor(function() return FindNearbyStealPrompt(12) end, 4, id)
+    if not prompt then return Fail("No Steal prompt near the egg.") end
+
+    local before = os.clock()
+    FirePrompt(prompt)
+    local ok = WaitFor(function()
+        return LastTriggered >= before or Carrying or GetDropButton() ~= nil
+    end, 3, id)
+    if not ok then return Fail("Steal did not register.") end
+
+    return RunDropWorkflow(id)
 end
 
 --==============================================================
--- SPAWN / SECOND STEAL PROMPT / WALK
+-- MAIN LOOP (starts the first time an automation toggle is turned on)
 --==============================================================
 
-local function FindSpawn()
-    local direct = workspace:FindFirstChild("SpawnLocation", true)
-    if direct and direct:IsA("BasePart") then return direct end
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("SpawnLocation") then return obj end
-    end
-    return nil
-end
+local LoopStarted = false
 
-local function FindLakeEggPoint()
-    local world = workspace:FindFirstChild("World")
-    local areas = world and world:FindFirstChild("Areas")
-    local guards = areas and areas:FindFirstChild("GuardAreas")
-    local lake = guards and guards:FindFirstChild("Lake")
-    local guard = lake and lake:FindFirstChild("Guard")
-    local point = guard and guard:FindFirstChild("EggPoint")
-    if point then return point end
-    for _, obj in ipairs(workspace:GetDescendants()) do if obj.Name == "EggPoint" then return obj end end
-    return nil
-end
+local function StartLoop()
+    if LoopStarted then return end
+    LoopStarted = true
 
-local function FindNearbyStealPrompt(excludePrompt)
-    local root = Root()
-    if not root then return nil end
-    local closest, best = nil, 18
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("ProximityPrompt") and obj ~= excludePrompt and obj.Enabled and IsStealPrompt(obj) then
-            local pos = GetPromptPosition(obj)
-            local d = pos and Distance(root.Position, pos) or math.huge
-            if d < best then closest, best = obj, d end
-        end
-    end
-    return closest
-end
-
-local function TriggerStealPrompt(prompt)
-    if not prompt or not prompt.Parent then EngineError("Steal prompt disappeared."); return false end
-    local ok = false
-    if type(fireproximityprompt) == "function" then
-        ok = pcall(function() fireproximityprompt(prompt, 0.1) end)
-    end
-    if not ok then
-        ok = pcall(function()
-            prompt:InputHoldBegin()
-            task.wait(math.max(0.1, prompt.HoldDuration))
-            prompt:InputHoldEnd()
-        end)
-    end
-    if ok then return true end
-    EngineError("Couldn't activate the Steal prompt.")
-    return false
-end
-
-local function FinishJob(jobToken, message, restart)
-    if jobToken ~= StealJobToken then return end
-    NextStealAllowedAt = os.clock() + POST_STEAL_COOLDOWN
-    CancelTween()
-    RestoreCharacterState()
-    StealBusy = false
-    CurrentMode = "Idle"
-    if message then Notify("Auto Steal", message, 2.5) end
-    SetStatus()
-    if restart then
-        task.delay(POST_STEAL_COOLDOWN, function()
-            if AUTO_STEAL and not StealBusy then
-                local candidate = FindBestEggCandidate()
-                if not candidate and AUTO_TREADMILL then ReturnToTreadmill() end
-            elseif AUTO_TREADMILL and not StealBusy then
-                ReturnToTreadmill()
-            end
-        end)
-    end
-end
-
-local function WalkToSpawn(jobToken, lakeStealPrompt)
-    local spawn, hum, root = FindSpawn(), Humanoid(), Root()
-    if not spawn or not hum or not root then EngineError("SpawnLocation/Humanoid/Root not found."); FinishJob(jobToken, "Workflow stopped.", true); return end
-    CancelTween()
-    CurrentMode = "StealWalk"
-    RememberCharacterState()
-    if BOOST_WALK then
-        hum.WalkSpeed = WALK_TO_SPAWN_SPEED
-        WalkBoosted = true
-    end
-    local destination = Vector3.new(spawn.Position.X, spawn.Position.Y + 2, spawn.Position.Z)
-    hum:MoveTo(destination)
-    Notify("Auto Steal", "Second Steal prompt activated. Walking to spawn...", 2)
-    SetStatus()
     task.spawn(function()
-        local started = os.clock()
-        while StealBusy and jobToken == StealJobToken and os.clock() - started < 60 do
-            task.wait(0.15)
-            root = Root()
-            if not root or not root.Parent then break end
-            if Distance(root.Position, destination) <= 6 then
-                FinishJob(jobToken, "Reached spawn. Cycle complete.", true)
-                return
+        while not Unloaded do
+            task.wait(0.5)
+            if Unloaded then break end
+            if Busy then continue end
+            if not Root() then continue end
+
+            -- 1) filtered auto steal
+            if AutoSteal then
+                local egg = PickBestEgg()
+                if egg then
+                    Busy = true
+                    local id = NewJob()
+                    local ok, err = pcall(RunAutoSteal, egg, id)
+                    if not ok then Notify("Auto Steal", "Error: " .. tostring(err), "error", 4) end
+                    Busy = false
+                    continue
+                end
             end
-        end
-        if StealBusy and jobToken == StealJobToken then
-            EngineError("Walk to spawn was interrupted or timed out.")
-            FinishJob(jobToken, "Spawn walk stopped.", true)
+
+            -- 2) treadmill: go there, wear it, stay; come back if you jump/walk off
+            if AutoTreadmill then
+                local spot = GetTreadmillSpot()
+                local r = Root()
+                local away = spot and r and (r.Position - spot).Magnitude > 8
+                if (not Worn or away) and os.clock() >= TreadmillRetryAt then
+                    Busy = true
+                    local id = NewJob()
+                    local ok, result = pcall(GoToTreadmill, id)
+                    if not ok or result ~= true then TreadmillRetryAt = os.clock() + 6 end
+                    Busy = false
+                elseif AutoSteal then
+                    SetStatus("On treadmill, waiting for a matching egg")
+                end
+            elseif AutoSteal then
+                SetStatus("Scanning for matching eggs")
+            end
         end
     end)
 end
 
-local function RunStealWorkflow(initialPrompt, initialCandidate, isAutomated)
-    if StealBusy then return false end
-    if not initialPrompt or not initialPrompt.Parent or not initialPrompt.Enabled then
-        EngineError("Target Steal prompt is no longer available.")
-        return false
+local function CancelAll(reason)
+    Job += 1
+    Busy = false
+    SpeedOverride = false
+    local h = Hum()
+    if h and h.Parent then h.WalkSpeed = DesiredWalkSpeed() end
+    if reason then SetStatus(reason) end
+end
+
+--==============================================================
+-- PLAYER FEATURES
+--==============================================================
+
+local function ApplySpeed()
+    local h = Hum()
+    if h and not SpeedOverride then h.WalkSpeed = DesiredWalkSpeed() end
+end
+
+Track(RunService.Heartbeat:Connect(function()
+    -- everything here is a no-op until you switch the matching toggle on
+    if SpeedAdjust and not SpeedOverride then
+        local h = Hum()
+        if h and h.WalkSpeed ~= CFG.PlayerSpeed then h.WalkSpeed = CFG.PlayerSpeed end
     end
-    StealBusy = true
-    StealJobToken += 1
-    local jobToken = StealJobToken
-    TreadmillToken += 1
-    CancelTween()
-    CurrentMode = "StealToEgg"
 
-    local candidate = initialCandidate or GetEggMetadata(initialPrompt)
-    LastTargetDescription = string.format("%s · %s · %s", tostring(candidate.Label), tostring(candidate.Rarity), tostring(candidate.Biome))
-    SetStatus()
-    Notify("Auto Steal", "Targeting " .. LastTargetDescription, 3, "info")
-
-    local position = GetPromptPosition(initialPrompt)
-    if not position then
-        EngineError("Target egg position could not be read.")
-        FinishJob(jobToken, "Target unavailable.", true)
-        return false
+    if AntiRagdoll then
+        local h = Hum()
+        if h then
+            local s = h:GetState()
+            if s == Enum.HumanoidStateType.Ragdoll or s == Enum.HumanoidStateType.FallingDown
+                or s == Enum.HumanoidStateType.Physics then
+                h:ChangeState(Enum.HumanoidStateType.GettingUp)
+            end
+            if h.PlatformStand then h.PlatformStand = false end
+        end
     end
 
-    local function AfterTargetArrival()
-        if not StealBusy or jobToken ~= StealJobToken then return end
-        if not initialPrompt.Parent or not initialPrompt.Enabled then
-            LastAttemptTime[initialPrompt] = os.clock()
-            FinishJob(jobToken, "Target disappeared before stealing; scanning again.", true)
-            return
-        end
-        local fresh = GetEggMetadata(initialPrompt)
-        if isAutomated and not MatchesFilters(fresh) then
-            LastAttemptTime[initialPrompt] = os.clock()
-            FinishJob(jobToken, "Target no longer matches filters; skipping it.", true)
-            return
-        end
-        if not TriggerStealPrompt(initialPrompt) then
-            LastAttemptTime[initialPrompt] = os.clock()
-            FinishJob(jobToken, "Steal prompt failed; retry will scan another egg.", true)
-            return
-        end
-
-        task.spawn(function()
-            -- Give the game a moment to attach the Drop UI/carry state after the prompt.
-            task.wait(0.3)
-            if not StealBusy or jobToken ~= StealJobToken then return end
-            local heldInfo = ReadPossibleCarriedEggInfo()
-            local wrongEggDetected = heldInfo and IsDetectedCarryWrong(heldInfo, candidate) or false
-            if wrongEggDetected then
-                Notify("Auto Steal", "Detected a carried egg that doesn't match the filter. Going to Lake to drop it, then searching again.", 3, "warning")
+    if AntiFling and not Busy then
+        local r = Root()
+        if r then
+            local v = r.AssemblyLinearVelocity
+            if v.Magnitude > math.max(150, CFG.PlayerSpeed * 2.5) then
+                r.AssemblyLinearVelocity = Vector3.zero
+                r.AssemblyAngularVelocity = Vector3.zero
             end
+        end
+    end
+end))
 
-            local lakePoint = FindLakeEggPoint()
-            if not lakePoint then
-                EngineError("Lake EggPoint not found at World.Areas.GuardAreas.Lake.Guard.EggPoint.")
-                LastAttemptTime[initialPrompt] = os.clock()
-                FinishJob(jobToken, "Lake point missing; workflow stopped.", true)
-                return
+Track(RunService.Stepped:Connect(function()
+    if Noclip then
+        local c = Char()
+        if c then
+            for _, part in ipairs(c:GetChildren()) do
+                if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end
             end
-            local lakePosition = PositionOf(lakePoint)
-            if not lakePosition then
-                EngineError("Lake EggPoint did not expose a position.")
-                FinishJob(jobToken, "Lake point invalid.", true)
-                return
+        end
+    end
+
+    if AntiFling then
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                for _, part in ipairs(plr.Character:GetChildren()) do
+                    if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end
+                end
             end
-            CurrentMode = "StealToLake"
-            Notify("Auto Steal", "Tweening to Lake Drop point...", 2)
-            SetStatus()
-            TweenToPosition(lakePosition, LAKE_STAND_OFFSET, "StealToLake", function()
-                if not StealBusy or jobToken ~= StealJobToken then return end
-                task.spawn(function()
-                    local dropped = ClickDropAndConfirm(jobToken)
-                    if not dropped then
-                        LastAttemptTime[initialPrompt] = os.clock()
-                        -- Hard requirement: never activate another prompt or walk to spawn without drop confirmation.
-                        FinishJob(jobToken, "Drop could not be confirmed; stopped at Lake.", true)
-                        return
-                    end
-                    task.wait(0.5)
-                    if not StealBusy or jobToken ~= StealJobToken then return end
+        end
+    end
+end))
 
-                    if wrongEggDetected then
-                        LastAttemptTime[initialPrompt] = os.clock()
-                        FinishJob(jobToken, "Wrong egg dropped. Rescanning for a filtered target.", true)
-                        return
-                    end
+Track(UserInputService.JumpRequest:Connect(function()
+    if InfiniteJump then
+        local h = Hum()
+        if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end
+end))
 
-                    local nearbyPrompt = FindNearbyStealPrompt(initialPrompt)
-                    if not nearbyPrompt then
-                        EngineError("Drop confirmed, but no nearby Steal prompt was found. Staying at Lake.")
-                        FinishJob(jobToken, "No nearby Steal prompt; spawn walk cancelled.", true)
-                        return
-                    end
-                    if not TriggerStealPrompt(nearbyPrompt) then
-                        FinishJob(jobToken, "Second Steal failed; spawn walk cancelled.", true)
-                        return
-                    end
-                    task.wait(0.15)
-                    if StealBusy and jobToken == StealJobToken then WalkToSpawn(jobToken, nearbyPrompt) end
-                end)
-            end, TRAVEL_SPEED)
+Track(LocalPlayer.CharacterAdded:Connect(function()
+    Worn = false
+    Carrying = false
+    Busy = false
+    Job += 1
+    SpeedOverride = false
+    task.wait(1)
+    ApplySpeed()
+end))
+
+-- Anti AFK (connected only while its toggle is on)
+local AntiAfkConn
+local function SetAntiAfk(on)
+    if on and not AntiAfkConn then
+        AntiAfkConn = LocalPlayer.Idled:Connect(function()
+            pcall(function()
+                local vu = game:GetService("VirtualUser")
+                vu:CaptureController()
+                vu:ClickButton2(Vector2.new())
+            end)
         end)
+    elseif not on and AntiAfkConn then
+        AntiAfkConn:Disconnect()
+        AntiAfkConn = nil
     end
+end
 
-    local started = TweenToPosition(position, EGG_STAND_OFFSET, "StealToEgg", AfterTargetArrival, TRAVEL_SPEED)
-    if not started then
-        LastAttemptTime[initialPrompt] = os.clock()
-        FinishJob(jobToken, "Could not start target tween.", true)
+-- Auto Reconnect (connected only while its toggle is on)
+local ReconnectConns = {}
+local ReconnectAttempts = 0
+local function TryRejoin()
+    if ReconnectAttempts >= 5 or Unloaded then return end
+    ReconnectAttempts += 1
+    task.wait(2)
+    pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+end
+
+local function SetAutoReconnect(on)
+    for _, c in ipairs(ReconnectConns) do pcall(function() c:Disconnect() end) end
+    table.clear(ReconnectConns)
+    ReconnectAttempts = 0
+    if not on then return end
+
+    table.insert(ReconnectConns, GuiService.ErrorMessageChanged:Connect(function(msg)
+        if msg and msg ~= "" then task.spawn(TryRejoin) end
+    end))
+    pcall(function()
+        local overlay = game:GetService("CoreGui").RobloxPromptGui.promptOverlay
+        table.insert(ReconnectConns, overlay.ChildAdded:Connect(function(child)
+            if child.Name == "ErrorPrompt" then task.spawn(TryRejoin) end
+        end))
+    end)
+end
+
+-- Auto Execute (re-runs a hosted copy of this script after you teleport/rejoin)
+local ScriptUrl = ""
+local AutoExecuteOn = false
+local OnTeleportConn
+
+local function QueueAutoExecute()
+    local queue = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+    if not queue then
+        Notify("Auto Execute", "Your executor has no queue_on_teleport.", "error", 4)
         return false
     end
+    if ScriptUrl == "" then
+        Notify("Auto Execute", "Paste a raw script URL first.", "warning", 4)
+        return false
+    end
+    queue(string.format("loadstring(game:HttpGet(%q))()", ScriptUrl))
     return true
 end
 
---==============================================================
--- PROMPT HOLD DURATION / MANUAL FLOW
---==============================================================
-
-local OriginalPromptDurations = setmetatable({}, {__mode = "k"})
-local function SetPromptFast(prompt, enabled)
-    if not IsStealPrompt(prompt) then return end
-    if enabled then
-        if OriginalPromptDurations[prompt] == nil then OriginalPromptDurations[prompt] = prompt.HoldDuration end
-        pcall(function() prompt.HoldDuration = 0.1 end)
-    else
-        local old = OriginalPromptDurations[prompt]
-        if old ~= nil and prompt.Parent then pcall(function() prompt.HoldDuration = old end) end
-        OriginalPromptDurations[prompt] = nil
+local function SetAutoExecute(on)
+    AutoExecuteOn = on
+    if on then
+        if QueueAutoExecute() then Notify("Auto Execute", "Queued for the next teleport.", "success", 3) end
+        if not OnTeleportConn then
+            OnTeleportConn = LocalPlayer.OnTeleport:Connect(function()
+                if AutoExecuteOn then pcall(QueueAutoExecute) end
+            end)
+        end
+    elseif OnTeleportConn then
+        OnTeleportConn:Disconnect()
+        OnTeleportConn = nil
     end
 end
-local function SetupAllStealPrompts(enabled)
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("ProximityPrompt") then SetPromptFast(obj, enabled) end
-    end
-end
-workspace.DescendantAdded:Connect(function(obj)
-    if obj:IsA("ProximityPrompt") and (AUTO_STEAL or MANUAL_INSTANT_STEAL) then
-        task.defer(function() if obj.Parent then SetPromptFast(obj, true) end end)
-    end
-end)
-
-ProximityPromptService.PromptTriggered:Connect(function(prompt, triggeringPlayer)
-    if triggeringPlayer ~= LocalPlayer or not IsStealPrompt(prompt) or StealBusy then return end
-    if MANUAL_INSTANT_STEAL and not AUTO_STEAL then
-        RunStealWorkflow(prompt, GetEggMetadata(prompt), false)
-    end
-end)
 
 --==============================================================
--- AUTO STEAL SEARCH LOOP
+-- WINDOW
 --==============================================================
 
-task.spawn(function()
-    while task.wait(TARGET_SCAN_INTERVAL) do
-        if AUTO_STEAL and not StealBusy and os.clock() >= NextStealAllowedAt then
-            local candidate, count = FindBestEggCandidate()
-            if candidate then
-                LastTargetDescription = string.format("%s · %s · %s", candidate.Label, candidate.Rarity, candidate.Biome)
-                SetStatus("Eligible prompts scanned: " .. tostring(count))
-                RunStealWorkflow(candidate.Prompt, candidate, true)
-            else
-                local filtersActive = HasAny(SelectedRarities) or HasAny(SelectedBiomes)
-                LastTargetDescription = filtersActive and "No matching filtered egg currently visible" or "No matching egg currently visible"
-                SetStatus("Eligible prompts scanned: 0")
-                if AUTO_TREADMILL and CurrentMode == "Idle" then ReturnToTreadmill() end
-            end
+Window = RageHub:CreateWindow({
+    Name = "Rage Hub",
+    Subtitle = "Steal An Egg",
+    Theme = "Rage",
+    Features = { Notifications = true },
+    ConfigFolder = "RageHub/StealAnEgg_v7",
+    Splash = true,
+    OnUnload = function()
+        Unloaded = true
+        InstantSteal, AutoSteal, AutoTreadmill = false, false, false
+        SpeedAdjust, InfiniteJump, Noclip, AntiRagdoll, AntiFling = false, false, false, false, false
+        Job += 1
+        SpeedOverride = false
+        RestoreHolds()
+        SetAntiAfk(false)
+        SetAutoReconnect(false)
+        SetAutoExecute(false)
+        for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
+        table.clear(Connections)
+        local h = Hum()
+        if h and h.Parent then h.WalkSpeed = 16 end
+    end,
+})
+
+local StealTab = Window:CreateTab("Steal", "🥚")
+local PlayerTab = Window:CreateTab("Player", "🏃")
+local OthersTab = Window:CreateTab("Others", "🧰")
+
+--==============================================================
+-- STEAL TAB
+--==============================================================
+
+local StatusSection = StealTab:CreateSection("Status")
+StatusLabel = StatusSection:CreateLabel("Status: Idle (everything is OFF)")
+
+local InstantSection = StealTab:CreateSection("Instant Steal")
+
+InstantSection:CreateToggle({
+    Name = "Instant Steal", Default = false,
+    Description = "One click on Steal, then Lake drop workflow",
+    Callback = function(on)
+        InstantSteal = on
+        if on then
+            EnsureListeners()
+            ApplyFastToAll()
+            Notify("Instant Steal", "ON: Steal hold = 0.1s. Click Steal to start the Lake workflow.", "success", 3)
+        else
+            RestoreHolds()
+            Notify("Instant Steal", "OFF: original hold time restored, no tween.", "info", 3)
         end
-    end
-end)
+    end,
+})
 
---==============================================================
--- AUTO TREADMILL RETURN MONITOR
---==============================================================
+InstantSection:CreateParagraph({
+    Title = "Workflow",
+    Content = "Click Steal > tween to Lake support > wait 0.5s > click Drop > wait for Steal > click Steal > walk to SpawnLocation. If a step is not confirmed it stops and does not walk.",
+})
 
-task.spawn(function()
-    local lastAirStarted = nil
-    while task.wait(0.25) do
-        if not AUTO_TREADMILL or StealBusy then lastAirStarted = nil; continue end
-        if CurrentMode == "TreadmillTravel" or CurrentMode == "TreadmillTesting" or CurrentMode == "TreadmillReturn" then continue end
-        local root, hum = Root(), Humanoid()
-        if not root or not hum then continue end
-        local target = (SavedTreadmill and SavedTreadmill.Parent and GetTreadmillStandPosition(SavedTreadmill)) or SavedTreadmillPosition
-        if target then
-            local horizontal = Vector3.new(root.Position.X - target.X, 0, root.Position.Z - target.Z).Magnitude
-            local airborne = hum.FloorMaterial == Enum.Material.Air
-            if airborne then lastAirStarted = lastAirStarted or os.clock() else lastAirStarted = nil end
-            local jumped = lastAirStarted and (os.clock() - lastAirStarted >= 0.15)
-            if horizontal > TREADMILL_RETURN_DISTANCE or jumped then
-                if CurrentMode ~= "TreadmillReturn" then
-                    Notify("Auto Treadmill", "You walked/jumped away. Returning to the saved treadmill...", 2, "warning")
-                    ReturnToTreadmill()
-                end
-            elseif CurrentMode == "Idle" then
-                ReturnToTreadmill()
-            end
-        elseif CurrentMode == "Idle" then
-            StartTreadmillSearch()
-        end
-    end
-end)
-
---==============================================================
--- UI CALLBACKS / FILTERS
---==============================================================
+local TreadmillSection = StealTab:CreateSection("Auto Treadmill")
 
 TreadmillSection:CreateToggle({
     Name = "Auto Treadmill", Default = false,
-    Description = "Tests candidates for speed gain every 2 seconds; saves and returns to a working treadmill.",
+    Description = "Finds YOUR treadmill, stays on it, returns if you leave",
     Callback = function(on)
-        AUTO_TREADMILL = on
+        AutoTreadmill = on
         if on then
-            Notify("Auto Treadmill", "Enabled. Testing treadmills for real speed gain...", 3)
-            if not StealBusy then StartTreadmillSearch() end
+            EnsureListeners()
+            StartLoop()
+            TreadmillRetryAt = 0
+            Notify("Auto Treadmill", "ON.", "success", 2)
         else
-            TreadmillToken += 1
-            if CurrentMode:find("Treadmill") then CancelTween(); CurrentMode = "Idle"; RestoreCharacterState() end
-            Notify("Auto Treadmill", "Disabled; no automatic return will run.", 2)
+            if Busy then CancelAll() end
+            Notify("Auto Treadmill", "OFF: no more returning to the treadmill.", "info", 3)
         end
-        SetStatus()
     end,
 })
 
-AutoStealSection:CreateToggle({
-    Name = "Auto Steal", Default = false,
-    Description = "Searches the server for the highest-priority matching egg and runs the Lake Drop workflow.",
+local AutoSection = StealTab:CreateSection("Auto Steal + Filter")
+
+AutoSection:CreateToggle({
+    Name = "Auto Steal (Filtered)", Default = false,
+    Description = "Tween to a matching egg, steal it, same workflow",
     Callback = function(on)
-        AUTO_STEAL = on
+        AutoSteal = on
         if on then
-            SetupAllStealPrompts(true)
-            Notify("Auto Steal", "Enabled. Empty filters = highest rarity/value currently visible.", 3, "success")
+            EnsureListeners()
+            task.spawn(RefreshSnapshot)
+            StartLoop()
+            Notify("Auto Steal", "ON. With Auto Treadmill on, it leaves the treadmill when a match spawns.", "success", 3)
         else
-            if StealBusy then
-                StealJobToken += 1
-                StealBusy = false
-                CancelTween()
-                RestoreCharacterState()
-                CurrentMode = "Idle"
-            end
-            if not MANUAL_INSTANT_STEAL then SetupAllStealPrompts(false) end
-            Notify("Auto Steal", "Disabled.", 2)
+            if Busy then CancelAll("Auto Steal stopped") end
+            Notify("Auto Steal", "OFF.", "info", 2)
         end
-        SetStatus()
     end,
 })
 
-AutoStealSection:CreateToggle({
-    Name = "Instant Steal", Default = false,
-    Description = "When enabled, activating a Steal prompt manually runs the same Lake Drop workflow.",
-    Callback = function(on)
-        MANUAL_INSTANT_STEAL = on
-        if on then SetupAllStealPrompts(true) elseif not AUTO_STEAL then SetupAllStealPrompts(false) end
-        Notify("Instant Steal", on and "Enabled." or "Disabled.", 2)
+AutoSection:CreateDropdown({
+    Name = "Rarities", Flag = "Rarities", Multi = true, SelectAll = true, Search = true,
+    Options = RARITIES, Default = {},
+    Description = "e.g. Divine + Eternal. Empty = any rarity",
+    Callback = function(list)
+        SelectedRarities = {}
+        for _, name in ipairs(list or {}) do SelectedRarities[tostring(name)] = true end
     end,
 })
 
-local function SetSelection(target, selected)
-    table.clear(target)
-    if type(selected) == "table" then
-        for _, item in ipairs(selected) do target[tostring(item)] = true end
-    end
-    SetStatus("Filters updated")
-    if HasAny(SelectedRarities) or HasAny(SelectedBiomes) then
-        Notify("Filters", "Filters are active. Eggs without readable matching metadata will be skipped.", 2)
-    else
-        Notify("Filters", "No filters selected: Auto Steal will prioritize the most valuable detectable egg.", 2)
-    end
-end
-
-RarityFilterSection:CreateDropdown({
-    Name = "Allowed Rarities", Flag = "AllowedRarities", Multi = true, SelectAll = true,
-    Options = RARITIES, Default = {}, Search = true,
-    Description = "Leave empty to use all rarities and auto-pick the highest-value candidate.",
-    Callback = function(selected) SetSelection(SelectedRarities, selected) end,
+AutoSection:CreateDropdown({
+    Name = "Biomes", Flag = "Biomes", Multi = true, SelectAll = true, Search = true,
+    Options = BIOMES, Default = {},
+    Description = "e.g. Enchanted Forest only. Empty = any biome",
+    Callback = function(list)
+        SelectedBiomes = {}
+        for _, name in ipairs(list or {}) do SelectedBiomes[tostring(name)] = true end
+    end,
 })
 
-BiomeFilterSection:CreateDropdown({
-    Name = "Allowed Biomes", Flag = "AllowedBiomes", Multi = true, SelectAll = true,
-    Options = BIOMES, Default = {}, Search = true,
-    Description = "Select one or more biomes. With Divine + Eternal and two biomes selected, only those matches qualify.",
-    Callback = function(selected) SetSelection(SelectedBiomes, selected) end,
+AutoSection:CreateDropdown({
+    Name = "Pick Order", Flag = "PickOrder",
+    Options = { "Highest Rarity", "Biggest Size", "Nearest" }, Default = "Highest Rarity",
+    Callback = function(v) if v then Priority = v end end,
 })
 
---==============================================================
--- OTHER TAB
---==============================================================
-
-MovementSection:CreateSlider({
-    Name = "Travel Speed", Flag = "TravelSpeed", Range = {50, 1500}, Increment = 25, Default = TRAVEL_SPEED, Suffix = " studs/s",
-    Description = "Tween speed for treadmill / egg / lake trips. Lower it if the game reacts to fast movement.",
-    Callback = function(v) TRAVEL_SPEED = v end,
-})
-
-MovementSection:CreateToggle({
-    Name = "Boost Walk Speed", Default = false,
-    Description = "Raises WalkSpeed while walking to spawn. Off = safer (uses the game's normal speed).",
-    Callback = function(on) BOOST_WALK = on end,
-})
-
-MovementSection:CreateSlider({
-    Name = "Boost Walk Speed Value", Range = {16, 200}, Increment = 4, Default = WALK_TO_SPAWN_SPEED, Suffix = " ws",
-    Callback = function(v) WALK_TO_SPAWN_SPEED = v end,
-})
-
-ToolsSection:CreateButton({
-    Name = "Scan Eggs (read-only)", ButtonText = "Scan",
-    Description = "Counts matching Steal prompts and shows the best one. Does not move or steal.",
+AutoSection:CreateButton({
+    Name = "Scan Eggs", ButtonText = "Scan",
+    Description = "Shows how many eggs match (does not move)",
     Callback = function()
         task.spawn(function()
-            local candidate, count = FindBestEggCandidate()
-            if candidate then
-                Notify("Scan", tostring(count) .. " match(es). Best: " .. string.format("%s · %s · %s", candidate.Label, candidate.Rarity, candidate.Biome), 4, "success")
+            EnsureListeners()
+            RefreshSnapshot()
+            local total = 0
+            for _ in pairs(Eggs) do total += 1 end
+            local best, matches = PickBestEgg()
+            if best then
+                Notify("Scan", string.format("%d tracked, %d match. Best: %s · %s · %s",
+                    total, matches, best.Rarity or "?", best.Category, best.Area), "success", 5)
             else
-                Notify("Scan", "No matching egg visible.", 3, "warning")
+                Notify("Scan", string.format("%d tracked, 0 match your filters.", total), "warning", 4)
             end
         end)
     end,
 })
 
-ToolsSection:CreateButton({
+local MoveSection = StealTab:CreateSection("Movement")
+
+MoveSection:CreateSlider({
+    Name = "Travel Speed", Flag = "TravelSpeed", Range = { 50, 1500 }, Increment = 25, Default = CFG.TravelSpeed,
+    Suffix = " studs/s", Callback = function(v) CFG.TravelSpeed = v end,
+})
+
+MoveSection:CreateSlider({
+    Name = "Spawn Walk Speed", Flag = "SpawnWalkSpeed", Range = { 16, 500 }, Increment = 4, Default = CFG.SpawnWalkSpeed,
+    Callback = function(v) CFG.SpawnWalkSpeed = v end,
+})
+
+MoveSection:CreateButton({
     Name = "Stop Everything", ButtonText = "Stop",
-    Description = "Cancels the current job and any movement.",
-    Callback = function()
-        StealJobToken += 1
-        StealBusy = false
-        TreadmillToken += 1
-        CancelTween()
-        RestoreCharacterState()
-        CurrentMode = "Idle"
-        SetStatus("Stopped")
-        Notify("Rage Hub", "Stopped.", 2)
+    Description = "Cancels the current job and movement",
+    Callback = function() CancelAll("Stopped") ; Notify("Rage Hub", "Stopped.", "info", 2) end,
+})
+
+--==============================================================
+-- PLAYER TAB
+--==============================================================
+
+local MovementSection = PlayerTab:CreateSection("Movement")
+
+MovementSection:CreateToggle({
+    Name = "Speed Adjust", Default = false,
+    Description = "Sets your WalkSpeed to the slider value",
+    Callback = function(on) SpeedAdjust = on; ApplySpeed() end,
+})
+
+MovementSection:CreateSlider({
+    Name = "Walk Speed", Flag = "PlayerSpeed", Range = { 16, 500 }, Increment = 2, Default = CFG.PlayerSpeed,
+    Callback = function(v) CFG.PlayerSpeed = v; if SpeedAdjust then ApplySpeed() end end,
+})
+
+MovementSection:CreateToggle({
+    Name = "Infinite Jump", Default = false,
+    Callback = function(on) InfiniteJump = on end,
+})
+
+MovementSection:CreateToggle({
+    Name = "Noclip", Default = false,
+    Callback = function(on) Noclip = on end,
+})
+
+local ProtectSection = PlayerTab:CreateSection("Protection")
+
+ProtectSection:CreateToggle({
+    Name = "Anti Ragdoll", Default = false,
+    Description = "Gets you back up when you are knocked down",
+    Callback = function(on) AntiRagdoll = on end,
+})
+
+ProtectSection:CreateToggle({
+    Name = "Anti Fling", Default = false,
+    Description = "Stops other players from pushing/flinging you",
+    Callback = function(on) AntiFling = on end,
+})
+
+local SessionSection = PlayerTab:CreateSection("Session")
+
+SessionSection:CreateToggle({
+    Name = "Anti AFK", Default = false,
+    Callback = function(on) SetAntiAfk(on) end,
+})
+
+SessionSection:CreateToggle({
+    Name = "Auto Reconnect", Default = false,
+    Description = "Rejoins if you get disconnected",
+    Callback = function(on) SetAutoReconnect(on) end,
+})
+
+SessionSection:CreateInput({
+    Name = "Script URL (for Auto Execute)", Default = "", Width = 300,
+    Placeholder = "https://raw.githubusercontent.com/you/repo/main/script.lua", Clearable = true,
+    Description = "Host this script first, then paste its raw link",
+    Callback = function(v)
+        ScriptUrl = tostring(v or "")
+        if AutoExecuteOn then QueueAutoExecute() end
     end,
 })
 
-ToolsSection:CreateParagraph({
-    Title = "Safe startup",
-    Content = "Auto Steal, Instant Steal, Auto Treadmill and Boost Walk Speed always start OFF and are never saved. Use the Settings tab for themes and configs.",
+SessionSection:CreateToggle({
+    Name = "Auto Execute", Default = false,
+    Description = "Re-runs the script after teleport / rejoin",
+    Callback = function(on) SetAutoExecute(on) end,
 })
 
--- Built-in RageHub settings tab (theme, config, unload).
+SessionSection:CreateButton({
+    Name = "Rejoin Server", ButtonText = "Rejoin",
+    Callback = function()
+        pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+    end,
+})
+
+--==============================================================
+-- OTHERS TAB (only actions the game itself already uses, from your spy log)
+--==============================================================
+
+local OtherSection = OthersTab:CreateSection("Quick Actions")
+
+OtherSection:CreateButton({
+    Name = "Claim Away Earnings", ButtonText = "Claim",
+    Description = "Same call the game's Claim button makes",
+    Callback = function()
+        task.spawn(function()
+            local rf = Net("RF/AwayEarnings/AskCollect")
+            if not rf then Notify("Away Earnings", "Remote not found.", "error", 3) return end
+            local ok, a = pcall(function() return rf:InvokeServer({ Kind = "Claim" }) end)
+            Notify("Away Earnings", ok and (a == true and "Claimed." or "Nothing to claim.") or ("Failed: " .. tostring(a)), ok and "success" or "error", 3)
+        end)
+    end,
+})
+
+OtherSection:CreateButton({
+    Name = "Wear Best Haul", ButtonText = "Wear",
+    Description = "Same call as the game's Wear Best",
+    Callback = function()
+        task.spawn(function()
+            local rf = Net("RF/Haul/WearBest")
+            if not rf then Notify("Haul", "Remote not found.", "error", 3) return end
+            local ok, a = pcall(function() return rf:InvokeServer() end)
+            Notify("Haul", ok and "Done." or ("Failed: " .. tostring(a)), ok and "success" or "error", 3)
+        end)
+    end,
+})
+
+OthersTab:CreateSection("Not added yet"):CreateParagraph({
+    Title = "Auto Race / Auto Butterfly",
+    Content = "Your spy log has no race or butterfly traffic, so there is nothing safe to copy yet. Record a spy log while doing one and I can add it.",
+})
+
+--==============================================================
+-- BUILT-IN SETTINGS TAB (theme, config, unload). Nothing is auto-loaded.
+--==============================================================
+
 pcall(function() Window:CreateSettingsTab() end)
-if USE_AUTOSAVE then pcall(function() Window:LoadConfig() end) end
 
---==============================================================
--- RESPAWN HANDLING
---==============================================================
-
-LocalPlayer.CharacterAdded:Connect(function()
-    CancelTween()
-    OriginalWalkSpeed, OriginalAutoRotate = nil, nil
-    if StealBusy then
-        StealJobToken += 1
-        StealBusy = false
-    end
-    CurrentMode = "Idle"
-    task.wait(1.25)
-    if AUTO_STEAL or MANUAL_INSTANT_STEAL then SetupAllStealPrompts(true) end
-    if AUTO_STEAL then
-        Notify("Auto Steal", "Respawn detected. Resuming egg search.", 2)
-    elseif AUTO_TREADMILL then
-        Notify("Auto Treadmill", "Respawn detected. Returning to saved treadmill.", 2)
-        ReturnToTreadmill()
-    end
-    SetStatus()
-end)
-
-Notify("Rage Hub", "Loaded. Everything is OFF until you turn it on.", 4, "success")
-SetStatus()
+Notify("Rage Hub", "Loaded. Everything is OFF until you turn it on.", "success", 4)
