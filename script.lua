@@ -1,4 +1,4 @@
---// Rage Hub · Steal An Egg · v7
+--// Rage Hub · Steal An Egg · v8
 --// Tabs: Steal | Player | Others (+ Rage Hub's built-in Settings tab)
 --//
 --// SAFE STARTUP: when you execute this, it only builds the UI. Nothing moves, nothing connects
@@ -26,6 +26,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
 local TeleportService = game:GetService("TeleportService")
 local GuiService = game:GetService("GuiService")
 local ProximityPromptService = game:GetService("ProximityPromptService")
@@ -62,8 +63,12 @@ local NAME_RARITY_FALLBACK = {
 
 local CFG = {
     TravelSpeed = 500,        -- studs/s for tween trips
-    SpawnWalkSpeed = 300,     -- WalkSpeed while walking to SpawnLocation (your request)
-    SupportOffset = 3,        -- stand this many studs above the Lake support part
+    SpawnWalkSpeed = 200,     -- WalkSpeed while walking to SpawnLocation (same as your working file; slider goes higher)
+    SupportOffset = 3,        -- stand this many studs above the Lake drop point
+    LakeTweenSeconds = 0.8,   -- fixed tween time to the Lake (same as your working file)
+    DropDelay = 0.1,          -- pause after arriving, before clicking Drop (was 0.5)
+    EquipInterval = 30,
+    ClaimInterval = 120,
     PlayerSpeed = 100,        -- Player tab walk speed (only used when its toggle is on)
 }
 
@@ -76,8 +81,14 @@ local Noclip = false
 local AntiRagdoll = false
 local AntiFling = false
 
-local SelectedRarities = {}   -- set; empty = any
-local SelectedBiomes = {}     -- set; empty = any
+local SelectedRarities = {}   -- set; empty or all = any
+local SelectedBiomes = {}     -- set (normalized names); empty or all = any
+local AllowUnknownRarity = false
+local EggAlert = false
+local AutoEquipBest = false
+local AutoClaimAway = false
+local OnEggSeen = function() end
+local ScanLog
 local Priority = "Highest Rarity"
 
 local Unloaded = false
@@ -150,47 +161,62 @@ local function Net(name)
     return nw and nw:FindFirstChild(name)
 end
 
-local function WaitFor(fn, timeout, id)
+local function WaitFor(fn, timeout, id, interval)
     local t0 = os.clock()
     repeat
         if Cancelled(id) then return nil end
         local v = fn()
         if v then return v end
-        task.wait(0.1)
+        task.wait(interval or 0.1)
     until os.clock() - t0 >= timeout
     return nil
 end
 
 --==============================================================
--- MOVEMENT (straight-line tween, verified arrival)
+-- MOVEMENT (TweenService CFrame tween, verified arrival)
 --==============================================================
 
-local function TweenTo(pos, id)
-    local started = os.clock()
-    while os.clock() - started < 90 do
-        if Cancelled(id) then return false end
-        local r = Root()
-        if not r then return false end
+local ActiveTween = nil
 
-        local offset = pos - r.Position
-        local dist = offset.Magnitude
-        if dist <= 2 then return true end
-
-        local dt = RunService.Heartbeat:Wait()
-        r = Root()
-        if not r then return false end
-
-        local step = math.min(CFG.TravelSpeed * dt, dist)
-        r.CFrame = CFrame.new(r.Position + offset.Unit * step) * r.CFrame.Rotation
-        r.AssemblyLinearVelocity = Vector3.zero
-    end
-    return false
+local function StopTween()
+    if ActiveTween then pcall(function() ActiveTween:Cancel() end); ActiveTween = nil end
 end
 
--- "100%": keep going until we really are within 2 studs (up to 3 attempts)
-local function TweenVerified(pos, id)
-    for _ = 1, 3 do
-        if TweenTo(pos, id) then return true end
+local function TweenTo(pos, id, duration)
+    local r = Root()
+    if not r then return false end
+    local dist = (r.Position - pos).Magnitude
+    if dist <= 2 then return true end
+
+    local seconds = duration or math.max(0.15, dist / CFG.TravelSpeed)
+    local tween = TweenService:Create(r, TweenInfo.new(seconds, Enum.EasingStyle.Linear), {
+        CFrame = CFrame.new(pos) * r.CFrame.Rotation,
+    })
+    local finished = false
+    tween.Completed:Connect(function() finished = true end)
+    ActiveTween = tween
+    tween:Play()
+
+    local t0 = os.clock()
+    while not finished do
+        if Cancelled(id) or os.clock() - t0 > seconds + 5 then
+            pcall(function() tween:Cancel() end)
+            ActiveTween = nil
+            return false
+        end
+        task.wait()
+    end
+    ActiveTween = nil
+
+    local nr = Root()
+    if nr then nr.AssemblyLinearVelocity = Vector3.zero end
+    return nr ~= nil and (nr.Position - pos).Magnitude <= 4
+end
+
+-- "100%": re-tween until we really are at the target (up to 3 attempts)
+local function TweenVerified(pos, id, duration)
+    for attempt = 1, 3 do
+        if TweenTo(pos, id, attempt == 1 and duration or nil) then return true end
         if Cancelled(id) then return false end
     end
     return false
@@ -251,6 +277,7 @@ local function PromptPosition(p)
     return nil
 end
 
+local LastWideScan = 0
 local function FindNearbyStealPrompt(range)
     local r = Root()
     if not r then return nil end
@@ -263,6 +290,17 @@ local function FindNearbyStealPrompt(range)
                     local d = pos and (pos - r.Position).Magnitude
                     if d and d < bestDist then best, bestDist = p, d end
                 end
+            end
+        end
+    end
+    -- fallback (throttled): the prompt may live somewhere other than SmartPromptPart
+    if not best and os.clock() - LastWideScan > 1 then
+        LastWideScan = os.clock()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("ProximityPrompt") and obj.Enabled and IsStealPrompt(obj) then
+                local pos = PromptPosition(obj)
+                local d = pos and (pos - r.Position).Magnitude
+                if d and d < bestDist then best, bestDist = obj, d end
             end
         end
     end
@@ -343,16 +381,32 @@ local function RestoreHolds()
 end
 
 --==============================================================
--- LAKE DROP WORKFLOW
---   Steal clicked -> tween to Lake support -> wait 0.5 -> Drop -> wait for Steal prompt
---   -> click Steal -> walk to SpawnLocation.  Stops (no spawn walk) if any step isn't confirmed.
+-- LAKE DROP WORKFLOW (same tween as your working file: Lake Guard EggPoint)
+--   Steal clicked -> tween to Lake EggPoint -> Drop -> wait for Steal -> click Steal -> walk to SpawnLocation
+--   Stops (no spawn walk) if any step isn't confirmed. Polling is fast so the egg is re-stolen
+--   before it can return to its nest.
 --==============================================================
 
-local function GetSupport()
-    local ok, part = pcall(function()
-        return workspace.World.Areas.GuardAreas.Lake.RequiredSpeedSign.Support
-    end)
-    return ok and part or nil
+local function PositionOfObj(obj)
+    if not obj then return nil end
+    if obj:IsA("BasePart") then return obj.Position end
+    if obj:IsA("Attachment") then return obj.WorldPosition end
+    if obj:IsA("Model") then
+        local ok, cf = pcall(function() return obj:GetPivot() end)
+        if ok then return cf.Position end
+    end
+    return nil
+end
+
+local function GetLakePoint()
+    local ok, point = pcall(function() return workspace.World.Areas.GuardAreas.Lake.Guard.EggPoint end)
+    if ok and point then return point end
+    ok, point = pcall(function() return workspace.World.Areas.GuardAreas.Lake.RequiredSpeedSign.Support end)
+    if ok and point then return point end
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj.Name == "EggPoint" then return obj end
+    end
+    return nil
 end
 
 local function Fail(msg)
@@ -362,55 +416,53 @@ local function Fail(msg)
 end
 
 local function RunDropWorkflow(id)
-    local support = GetSupport()
-    if not support then return Fail("Lake support part not found. Stopped.") end
+    local point = GetLakePoint()
+    local pos = PositionOfObj(point)
+    if not pos then return Fail("Lake EggPoint not found. Stopped.") end
 
-    -- 1) tween to the support
-    SetStatus("Tweening to Lake support")
-    if not TweenVerified(support.Position + Vector3.new(0, CFG.SupportOffset, 0), id) then
-        return Fail("Could not reach the Lake support. Stopped.")
+    -- 1) tween to the Lake (fixed duration, like your working file)
+    SetStatus("Tweening to Lake")
+    if not TweenVerified(pos + Vector3.new(0, CFG.SupportOffset, 0), id, CFG.LakeTweenSeconds) then
+        return Fail("Could not reach the Lake. Stopped.")
     end
 
-    -- 2) stop 0.5s
-    SetStatus("Stopped at support (0.5s)")
-    task.wait(0.5)
+    -- 2) tiny pause, then Drop as fast as the button appears
+    if CFG.DropDelay > 0 then task.wait(CFG.DropDelay) end
     if Cancelled(id) then return false end
 
-    -- 3) Drop (HUD button) and confirm it really dropped
-    local btn = WaitFor(GetDropButton, 5, id)
+    local btn = WaitFor(GetDropButton, 5, id, 0.03)
     if not btn then return Fail("Drop button did not appear. Stopped (no spawn walk).") end
 
     local dropped = false
     local wasCarrying = Carrying
-    for _ = 1, 4 do
+    for _ = 1, 10 do
         SetStatus("Clicking Drop")
         ClickGui(btn)
-        task.wait(0.4)
-        -- confirmed only if the Drop button is gone, or the game says you stopped carrying
+        task.wait(0.12)
         if not GetDropButton() or (wasCarrying and not Carrying) then dropped = true; break end
         btn = GetDropButton() or btn
     end
     if not dropped then return Fail("Drop not confirmed. Stopped (no spawn walk).") end
 
-    -- 4) wait for the Steal prompt of the dropped egg, then click it
+    -- 3) the dropped egg gets its own Steal prompt: grab it again immediately
     SetStatus("Waiting for Steal prompt")
-    local prompt = WaitFor(function() return FindNearbyStealPrompt(14) end, 8, id)
+    local prompt = WaitFor(function() return FindNearbyStealPrompt(14) end, 6, id, 0.03)
     if not prompt then return Fail("Steal prompt did not show after Drop. Stopped (no spawn walk).") end
 
     local stolen = false
-    for _ = 1, 4 do
+    for _ = 1, 6 do
         local before = os.clock()
         SetStatus("Clicking Steal")
         FirePrompt(prompt)
         local ok = WaitFor(function()
             return LastTriggered >= before or Carrying or GetDropButton() ~= nil or not prompt.Parent or not prompt.Enabled
-        end, 1.5, id)
+        end, 0.6, id, 0.03)
         if ok then stolen = true; break end
         prompt = FindNearbyStealPrompt(14) or prompt
     end
     if not stolen then return Fail("Second Steal not confirmed. Stopped (no spawn walk).") end
 
-    -- 5) walk to SpawnLocation
+    -- 4) walk to SpawnLocation
     local arrived = WalkToSpawn(id)
     if arrived then
         SetStatus("Done: reached SpawnLocation")
@@ -503,7 +555,9 @@ local ListenersOn = false
 local function IngestEgg(rec, depth)
     if type(rec) ~= "table" or (depth or 0) > 3 then return end
     if type(rec.Uid) == "string" then
+        local isNew = Eggs[rec.Uid] == nil
         Eggs[rec.Uid] = rec
+        pcall(OnEggSeen, rec, isNew)
         return
     end
     for _, v in pairs(rec) do
@@ -534,6 +588,17 @@ local function EnsureListeners()
 
     local batch = Net("RE/EggWorld/FieldEggBatchShifted")
     if batch then Track(batch.OnClientEvent:Connect(function(data) IngestEgg(data, 0) end)) end
+
+    local verdict = Net("RE/EggWorld/FieldEggRedeemVerdict")
+    if verdict then
+        Track(verdict.OnClientEvent:Connect(function(data)
+            if type(data) == "table" and type(data.AssetCategory) == "string" and type(data.Rarity) == "string" then
+                local name
+                for _, n in ipairs(RARITIES) do if Lower(n) == Lower(data.Rarity) then name = n end end
+                if name then RarityCache[data.AssetCategory] = name end
+            end
+        end))
+    end
 
     local gone = Net("RE/EggWorld/FieldEggGone")
     if gone then
@@ -584,21 +649,73 @@ local function MatchRarityName(value)
     return nil
 end
 
-local function ResolveRarity(category)
-    if type(category) ~= "string" then return nil end
-    if RarityCache[category] ~= nil then return RarityCache[category] or nil end
+local function Norm(text)
+    return (Lower(text):gsub("[%s_%-]", ""))
+end
 
+local function SetSize(set)
+    local n = 0
+    for _ in pairs(set) do n += 1 end
+    return n
+end
+
+local function DeepFindRarity(t, depth, seen)
+    if type(t) ~= "table" or depth > 3 or seen[t] then return nil end
+    seen[t] = true
+    for k, v in pairs(t) do
+        if type(v) == "string" then
+            local key = Lower(k)
+            if string.find(key, "rarity", 1, true) or string.find(key, "tier", 1, true) then
+                local r = MatchRarityName(v)
+                if r then return r end
+            end
+        end
+    end
+    for _, v in pairs(t) do
+        if type(v) == "table" then
+            local r = DeepFindRarity(v, depth + 1, seen)
+            if r then return r end
+        end
+    end
+    for _, v in pairs(t) do
+        if type(v) == "string" then
+            local r = MatchRarityName(v)
+            if r then return r end
+        end
+    end
+    return nil
+end
+
+local function GetAssetModule(category)
+    local data = ReplicatedStorage:FindFirstChild("Data")
+    local assets = data and data:FindFirstChild("Assets")
+    local mod = assets and assets:FindFirstChild(category)
+    if mod and mod:IsA("ModuleScript") then return mod end
+    return nil
+end
+
+-- returns rarity (or nil) and a short note about where it came from
+local function ResolveRarity(rec)
+    if type(rec.Rarity) == "string" then
+        local r = MatchRarityName(rec.Rarity)
+        if r then return r, "record" end
+    end
+
+    local category = rec.AssetCategory
+    if type(category) ~= "string" then return nil, "no AssetCategory" end
+    if RarityCache[category] then return RarityCache[category], "cache" end
+
+    local note = "no module"
     local found
     pcall(function()
-        local data = ReplicatedStorage:FindFirstChild("Data")
-        local assets = data and data:FindFirstChild("Assets")
-        local mod = assets and assets:FindFirstChild(category)
-        if mod and mod:IsA("ModuleScript") then
+        local mod = GetAssetModule(category)
+        if mod then
             local ok, t = pcall(require, mod)
             if ok and type(t) == "table" then
-                local r = t.Rarity or t.rarity or t.Tier
-                if type(r) ~= "string" and type(t.Info) == "table" then r = t.Info.Rarity end
-                if type(r) == "string" then found = MatchRarityName(r) end
+                found = DeepFindRarity(t, 0, {})
+                note = found and "module" or "module has no rarity"
+            else
+                note = "module not readable"
             end
         end
     end)
@@ -606,34 +723,56 @@ local function ResolveRarity(category)
     if not found then
         local n = Lower(category)
         for _, pair in ipairs(NAME_RARITY_FALLBACK) do
-            if string.find(n, pair[1], 1, true) then found = pair[2]; break end
+            if string.find(n, pair[1], 1, true) then found = pair[2]; note = "name list"; break end
         end
     end
 
-    RarityCache[category] = found or false
-    return found
+    if found then RarityCache[category] = found end
+    return found, note
 end
 
-local function HasAny(set) return next(set) ~= nil end
+local function RarityFilterOn()
+    local n = SetSize(SelectedRarities)
+    return n > 0 and n < #RARITIES
+end
+
+local function BiomeFilterOn()
+    local n = SetSize(SelectedBiomes)
+    return n > 0 and n < #BIOMES
+end
 
 local function EggPosition(rec)
     local cf = rec.BottomCFrame or rec.BoundsCFrame
-    return typeof(cf) == "CFrame" and cf.Position or nil
+    if typeof(cf) == "CFrame" then return cf.Position end
+    return nil
 end
 
+-- returns egg-info or nil, plus a reason string
 local function EvaluateEgg(rec)
-    if rec.State ~= "Slot" then return nil end
-    local pos = EggPosition(rec)
-    if not pos then return nil end
+    local state = rec.State
+    if state == "Carried" or state == "GuardCarried" then return nil, "being carried" end
 
-    local rarity = ResolveRarity(rec.AssetCategory)
-    if HasAny(SelectedRarities) and (not rarity or not SelectedRarities[rarity]) then return nil end
-    if HasAny(SelectedBiomes) and not SelectedBiomes[tostring(rec.AreaId)] then return nil end
+    local pos = EggPosition(rec)
+    if not pos then return nil, "no position" end
+
+    local rarity, note = ResolveRarity(rec)
+
+    if RarityFilterOn() then
+        if rarity then
+            if not SelectedRarities[rarity] then return nil, "rarity " .. rarity end
+        elseif not AllowUnknownRarity then
+            return nil, "rarity unknown (" .. tostring(note) .. ")"
+        end
+    end
+
+    if BiomeFilterOn() and not SelectedBiomes[Norm(rec.AreaId)] then
+        return nil, "biome " .. tostring(rec.AreaId)
+    end
 
     return {
         Uid = rec.Uid, Pos = pos, Rarity = rarity, Rank = rarity and RARITY_RANK[rarity] or 0,
         Area = tostring(rec.AreaId), Category = tostring(rec.AssetCategory), Size = tonumber(rec.AssetScale) or 0,
-    }
+    }, "ok"
 end
 
 local function PickBestEgg()
@@ -647,7 +786,7 @@ local function PickBestEgg()
             if e then
                 count += 1
                 e.Dist = (e.Pos - r.Position).Magnitude
-                local better = false
+                local better
                 if not best then
                     better = true
                 elseif Priority == "Nearest" then
@@ -662,6 +801,70 @@ local function PickBestEgg()
         end
     end
     return best, count
+end
+
+local function Log(text, color)
+    if ScanLog then pcall(function() ScanLog:Add(text, color) end) end
+end
+
+local function JoinCounts(t)
+    local parts = {}
+    for k, v in pairs(t) do table.insert(parts, tostring(k) .. "=" .. tostring(v)) end
+    table.sort(parts)
+    return #parts > 0 and table.concat(parts, ", ") or "-"
+end
+
+local function RunScan()
+    EnsureListeners()
+    RefreshSnapshot()
+
+    local total, passed = 0, 0
+    local states, reasons, samples = {}, {}, {}
+    local moduleNote
+
+    for _, rec in pairs(Eggs) do
+        total += 1
+        local st = tostring(rec.State)
+        states[st] = (states[st] or 0) + 1
+
+        local egg, reason = EvaluateEgg(rec)
+        if egg then passed += 1 else reasons[reason] = (reasons[reason] or 0) + 1 end
+
+        local rarity, note = ResolveRarity(rec)
+        if not rarity and not moduleNote and type(rec.AssetCategory) == "string" then
+            local mod = GetAssetModule(rec.AssetCategory)
+            if mod then
+                local ok, t = pcall(require, mod)
+                if ok and type(t) == "table" then
+                    local keys = {}
+                    for k in pairs(t) do table.insert(keys, tostring(k)) if #keys >= 14 then break end end
+                    moduleNote = rec.AssetCategory .. " module keys: " .. table.concat(keys, ", ")
+                end
+            end
+        end
+
+        if #samples < 6 then
+            table.insert(samples, string.format("%s | %s | %s | %s | %s",
+                tostring(rec.AssetCategory), tostring(rec.AreaId), st, rarity or "rarity?", egg and "MATCH" or reason))
+        end
+    end
+
+    local head = string.format("%d tracked, %d match", total, passed)
+    Log("---- Scan: " .. head)
+    Log("states: " .. JoinCounts(states))
+    Log("skipped: " .. JoinCounts(reasons))
+    for _, line in ipairs(samples) do Log(line) end
+    if moduleNote then Log(moduleNote) end
+
+    Notify("Scan", head, passed > 0 and "success" or "warning", 5)
+end
+
+OnEggSeen = function(rec, isNew)
+    if not EggAlert or not isNew or rec.State ~= "Slot" then return end
+    local egg = EvaluateEgg(rec)
+    if egg then
+        Notify("Egg Alert", string.format("%s · %s · %s", egg.Rarity or "?", egg.Category, egg.Area), "success", 5)
+    end
 end
 
 --==============================================================
@@ -750,6 +953,7 @@ end
 
 local function CancelAll(reason)
     Job += 1
+    StopTween()
     Busy = false
     SpeedOverride = false
     local h = Hum()
@@ -928,7 +1132,9 @@ Window = RageHub:CreateWindow({
         Unloaded = true
         InstantSteal, AutoSteal, AutoTreadmill = false, false, false
         SpeedAdjust, InfiniteJump, Noclip, AntiRagdoll, AntiFling = false, false, false, false, false
+        EggAlert, AutoEquipBest, AutoClaimAway = false, false, false
         Job += 1
+        StopTween()
         SpeedOverride = false
         RestoreHolds()
         SetAntiAfk(false)
@@ -1029,7 +1235,7 @@ AutoSection:CreateDropdown({
     Description = "e.g. Enchanted Forest only. Empty = any biome",
     Callback = function(list)
         SelectedBiomes = {}
-        for _, name in ipairs(list or {}) do SelectedBiomes[tostring(name)] = true end
+        for _, name in ipairs(list or {}) do SelectedBiomes[Norm(name)] = true end
     end,
 })
 
@@ -1039,25 +1245,28 @@ AutoSection:CreateDropdown({
     Callback = function(v) if v then Priority = v end end,
 })
 
-AutoSection:CreateButton({
-    Name = "Scan Eggs", ButtonText = "Scan",
-    Description = "Shows how many eggs match (does not move)",
-    Callback = function()
-        task.spawn(function()
-            EnsureListeners()
-            RefreshSnapshot()
-            local total = 0
-            for _ in pairs(Eggs) do total += 1 end
-            local best, matches = PickBestEgg()
-            if best then
-                Notify("Scan", string.format("%d tracked, %d match. Best: %s · %s · %s",
-                    total, matches, best.Rarity or "?", best.Category, best.Area), "success", 5)
-            else
-                Notify("Scan", string.format("%d tracked, 0 match your filters.", total), "warning", 4)
-            end
-        end)
+AutoSection:CreateToggle({
+    Name = "Allow Unknown Rarity", Default = false,
+    Description = "Also take eggs whose rarity can't be read",
+    Callback = function(on) AllowUnknownRarity = on end,
+})
+
+AutoSection:CreateToggle({
+    Name = "Egg Alert", Default = false,
+    Description = "Notify when a matching egg spawns (no moving)",
+    Callback = function(on)
+        EggAlert = on
+        if on then EnsureListeners(); task.spawn(RefreshSnapshot) end
     end,
 })
+
+AutoSection:CreateButton({
+    Name = "Scan Eggs", ButtonText = "Scan",
+    Description = "Fills the report below (why eggs match or not)",
+    Callback = function() task.spawn(RunScan) end,
+})
+
+ScanLog = AutoSection:CreateLog({ Name = "Scan Report", Height = 150, MaxLines = 60 })
 
 local MoveSection = StealTab:CreateSection("Movement")
 
@@ -1069,6 +1278,18 @@ MoveSection:CreateSlider({
 MoveSection:CreateSlider({
     Name = "Spawn Walk Speed", Flag = "SpawnWalkSpeed", Range = { 16, 500 }, Increment = 4, Default = CFG.SpawnWalkSpeed,
     Callback = function(v) CFG.SpawnWalkSpeed = v end,
+})
+
+MoveSection:CreateSlider({
+    Name = "Lake Tween Time", Flag = "LakeTween", Range = { 0.2, 3 }, Increment = 0.1, Default = CFG.LakeTweenSeconds,
+    Suffix = " s", Description = "Fixed time of the tween to the Lake",
+    Callback = function(v) CFG.LakeTweenSeconds = v end,
+})
+
+MoveSection:CreateSlider({
+    Name = "Drop Delay", Flag = "DropDelay", Range = { 0, 1 }, Increment = 0.05, Default = CFG.DropDelay,
+    Suffix = " s", Description = "Pause before clicking Drop (lower = faster)",
+    Callback = function(v) CFG.DropDelay = v end,
 })
 
 MoveSection:CreateButton({
@@ -1158,43 +1379,97 @@ SessionSection:CreateButton({
 -- OTHERS TAB (only actions the game itself already uses, from your spy log)
 --==============================================================
 
-local OtherSection = OthersTab:CreateSection("Quick Actions")
+local FarmSection = OthersTab:CreateSection("Auto Farm (game's own actions)")
 
-OtherSection:CreateButton({
-    Name = "Claim Away Earnings", ButtonText = "Claim",
-    Description = "Same call the game's Claim button makes",
+local MaintLoopStarted = false
+local LastEquip, LastClaim = 0, 0
+
+local function DoEquipBest()
+    local rf = Net("RF/Haul/WearBest")
+    if not rf or not rf:IsA("RemoteFunction") then return false, "remote not found" end
+    return pcall(function() return rf:InvokeServer() end)
+end
+
+local function DoClaimAway()
+    local rf = Net("RF/AwayEarnings/AskCollect")
+    if not rf or not rf:IsA("RemoteFunction") then return false, "remote not found" end
+    return pcall(function() return rf:InvokeServer({ Kind = "Claim" }) end)
+end
+
+local function StartMaintLoop()
+    if MaintLoopStarted then return end
+    MaintLoopStarted = true
+    task.spawn(function()
+        while not Unloaded do
+            task.wait(1)
+            if Unloaded then break end
+            if AutoEquipBest and os.clock() - LastEquip >= CFG.EquipInterval then
+                LastEquip = os.clock()
+                pcall(DoEquipBest)
+            end
+            if AutoClaimAway and os.clock() - LastClaim >= CFG.ClaimInterval then
+                LastClaim = os.clock()
+                pcall(DoClaimAway)
+            end
+        end
+    end)
+end
+
+FarmSection:CreateToggle({
+    Name = "Auto Equip Best", Default = false,
+    Description = "Calls the game's Equip Best every interval",
+    Callback = function(on) AutoEquipBest = on; LastEquip = 0; if on then StartMaintLoop() end end,
+})
+
+FarmSection:CreateSlider({
+    Name = "Equip Best Interval", Flag = "EquipInterval", Range = { 5, 300 }, Increment = 5, Default = CFG.EquipInterval,
+    Suffix = " s", Callback = function(v) CFG.EquipInterval = v end,
+})
+
+FarmSection:CreateToggle({
+    Name = "Auto Claim Away Earnings", Default = false,
+    Description = "Claims offline earnings every interval",
+    Callback = function(on) AutoClaimAway = on; LastClaim = 0; if on then StartMaintLoop() end end,
+})
+
+FarmSection:CreateSlider({
+    Name = "Claim Interval", Flag = "ClaimInterval", Range = { 30, 600 }, Increment = 10, Default = CFG.ClaimInterval,
+    Suffix = " s", Callback = function(v) CFG.ClaimInterval = v end,
+})
+
+local QuickSection = OthersTab:CreateSection("Quick Actions")
+
+QuickSection:CreateButton({
+    Name = "Equip Best Now", ButtonText = "Equip",
     Callback = function()
         task.spawn(function()
-            local rf = Net("RF/AwayEarnings/AskCollect")
-            if not rf then Notify("Away Earnings", "Remote not found.", "error", 3) return end
-            local ok, a = pcall(function() return rf:InvokeServer({ Kind = "Claim" }) end)
-            Notify("Away Earnings", ok and (a == true and "Claimed." or "Nothing to claim.") or ("Failed: " .. tostring(a)), ok and "success" or "error", 3)
+            local ok, r = DoEquipBest()
+            Notify("Equip Best", ok and "Done." or ("Failed: " .. tostring(r)), ok and "success" or "error", 3)
         end)
     end,
 })
 
-OtherSection:CreateButton({
-    Name = "Wear Best Haul", ButtonText = "Wear",
-    Description = "Same call as the game's Wear Best",
+QuickSection:CreateButton({
+    Name = "Claim Away Earnings Now", ButtonText = "Claim",
     Callback = function()
         task.spawn(function()
-            local rf = Net("RF/Haul/WearBest")
-            if not rf then Notify("Haul", "Remote not found.", "error", 3) return end
-            local ok, a = pcall(function() return rf:InvokeServer() end)
-            Notify("Haul", ok and "Done." or ("Failed: " .. tostring(a)), ok and "success" or "error", 3)
+            local ok, r = DoClaimAway()
+            Notify("Away Earnings", ok and "Claimed (or nothing to claim)." or ("Failed: " .. tostring(r)), ok and "success" or "error", 3)
         end)
     end,
 })
 
-OthersTab:CreateSection("Not added yet"):CreateParagraph({
-    Title = "Auto Race / Auto Butterfly",
-    Content = "Your spy log has no race or butterfly traffic, so there is nothing safe to copy yet. Record a spy log while doing one and I can add it.",
+local ScriptSection = OthersTab:CreateSection("Script")
+
+ScriptSection:CreateButton({
+    Name = "Unload Script", ButtonText = "Unload",
+    Description = "Stops everything and removes the UI",
+    Callback = function() pcall(function() Window:Destroy() end) end,
 })
 
---==============================================================
--- BUILT-IN SETTINGS TAB (theme, config, unload). Nothing is auto-loaded.
---==============================================================
-
-pcall(function() Window:CreateSettingsTab() end)
+OthersTab:CreateSection("Needs a spy log"):CreateParagraph({
+    Title = "Auto Place Egg / Hatch / Fuse / Race / Butterfly",
+    Content = "Your logs have no calls for these, and guessing remote arguments is how you get kicked (this game has an anti-cheat that probes the client). Record a spy log while you do each one once and they can be added.",
+})
 
 Notify("Rage Hub", "Loaded. Everything is OFF until you turn it on.", "success", 4)
