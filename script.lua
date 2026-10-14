@@ -1,9 +1,9 @@
---// Rage Hub · Steal An Egg · v9
+--// Rage Hub · Steal An Egg · v1
 --// Tabs: Steal | Player | Others (+ Rage Hub's built-in Settings tab)
 --//
---// SAFE STARTUP: when you execute this, it only builds the UI. Nothing moves, nothing connects
---// to game remotes, and every toggle is OFF. Each feature starts working only when YOU turn it on,
---// and toggles are never saved/restored.
+--// CONFIG: Auto Save is ON by default. Your toggles, filters and sliders are saved and restored
+--// automatically (this is what makes reconnect + auto execute bring everything back ON).
+--// If a saved toggle ever causes trouble at startup: Others > Reset Saved Config.
 --//
 --// Game facts used (from your dump + remote spy):
 --//   Steal prompt     : workspace.SmartPromptPart.<CarryAreaEgg>  (ActionText "Steal")
@@ -69,6 +69,10 @@ local CFG = {
     DropTweenSpeed = 1000,    -- studs/s: near trips are faster than the max time (adaptive)
     MinTween = 0.2,           -- never faster than this
     DropDelay = 0.5,          -- stop at the drop area this long before clicking Drop
+    ApproachSpeed = 400,      -- Auto Steal: speed of each burst toward the egg
+    ApproachBurst = 0.8,      -- Auto Steal: max seconds of one burst
+    ApproachPause = 0.3,      -- Auto Steal: pause between bursts (anti-cheat friendly)
+    MaxRecoveries = 2,        -- times it goes back for an egg the guard returned to its nest
     EquipInterval = 30,
     ClaimInterval = 120,
     PlayerSpeed = 100,        -- Player tab walk speed (only used when its toggle is on)
@@ -81,7 +85,7 @@ local SpeedAdjust = false
 local InfiniteJump = false
 local Noclip = false
 local AntiRagdoll = false
-local AntiFling = false
+local AutoSaveOn = true
 
 local SelectedRarities = {}   -- set; empty or all = any
 local SelectedBiomes = {}     -- set (normalized names); empty or all = any
@@ -97,6 +101,9 @@ local PauseUntil = 0
 local DropArea = "Forest"      -- Forest | Lake | Auto (nearest)
 local CarriedUid = nil        -- uid of the egg you carry (from the server)
 local CarriedUidAt = 0
+local NestPos = {}               -- uid -> where that egg's nest is
+local EggSeenAt = {}             -- uid -> when the server last updated that egg
+local DescribeEgg = function() return "egg" end
 local Priority = "Highest Rarity"
 
 local Unloaded = false
@@ -228,6 +235,32 @@ local function TweenVerified(pos, id, duration)
         if Cancelled(id) then return false end
     end
     return false
+end
+
+-- Approach used by Auto Steal / egg recovery: short bursts with a pause between them,
+-- so the character is never moving fast for one long continuous stretch.
+local function ApproachTo(pos, id)
+    for _ = 1, 60 do
+        if Cancelled(id) then return false end
+        local r = Root()
+        if not r then return false end
+
+        local offset = pos - r.Position
+        local dist = offset.Magnitude
+        if dist <= 3 then return true end
+
+        local step = math.min(dist, CFG.ApproachSpeed * CFG.ApproachBurst)
+        local nextPos = r.Position + offset.Unit * step
+        TweenTo(nextPos, id, math.max(0.1, step / CFG.ApproachSpeed))
+        if Cancelled(id) then return false end
+
+        local r2 = Root()
+        if r2 and (r2.Position - pos).Magnitude > 3 then
+            task.wait(CFG.ApproachPause)
+        end
+    end
+    local r = Root()
+    return r ~= nil and (r.Position - pos).Magnitude <= 4
 end
 
 local function DesiredWalkSpeed()
@@ -481,80 +514,184 @@ local function FindPromptNearPos(pos, maxDist)
     return best
 end
 
-local function RunDropWorkflow(id)
-    -- 0) the steal must really be registered BEFORE we move (Drop button = you carry an egg)
-    local uid = (os.clock() - CarriedUidAt < 30) and CarriedUid or nil
-    if not WaitFor(GetDropButton, 3, id, 0.03) then
-        return Fail("Steal not registered (no Drop button). Not moving.")
+-- which egg is at a nest position (used the moment you click Steal)
+local function UidAtPos(pos)
+    local bestUid, bestDist = nil, 5
+    local flat = Vector3.new(pos.X, 0, pos.Z)
+    for uid, rec in pairs(Eggs) do
+        local p = NestPos[uid] or EggPosition(rec)
+        if p then
+            local d = (Vector3.new(p.X, 0, p.Z) - flat).Magnitude
+            if d < bestDist then bestUid, bestDist = uid, d end
+        end
     end
-    uid = ((os.clock() - CarriedUidAt < 30) and CarriedUid) or uid
+    return bestUid
+end
 
+local function CarrierIsMe(rec)
+    return rec ~= nil and tonumber(rec.CarrierUserId) == LocalPlayer.UserId
+end
+
+-- only trusts an update that arrived AFTER `since` (old records can be stale)
+local function EggWentBack(uid, since)
+    local rec = uid and Eggs[uid]
+    return rec ~= nil and (EggSeenAt[uid] or 0) >= since
+        and (rec.State == "GuardCarried" or rec.State == "Slot")
+end
+
+-- carry the egg to the drop area, stop, click Drop.
+-- returns "dropped", "lost" (egg left you before the drop) or nil (hard failure)
+local function DropAtArea(id)
     local point = GetDropPoint()
     local pos = PositionOfObj(point)
-    if not pos then return Fail("Drop point not found for " .. DropArea .. ". Stopped.") end
+    if not pos then Fail("Drop point not found for " .. DropArea .. ". Stopped."); return nil end
     local target = pos + Vector3.new(0, CFG.SupportOffset, 0)
 
-    -- 1) tween to the drop area (adaptive time: near = fast, far = capped)
     local r = Root()
-    if not r then return false end
+    if not r then return nil end
     local seconds = DropTweenSeconds((r.Position - target).Magnitude)
     SetStatus(string.format("Tweening to %s (%.2fs)", DropArea, seconds))
     Log(string.format("Tween to %s in %.2fs", DropArea, seconds))
     if not TweenVerified(target, id, seconds) then
-        return Fail("Could not reach the drop area. Stopped.")
+        Fail("Could not reach the drop area. Stopped.")
+        return nil
     end
 
-    -- arrival check: if the egg is already gone, something else dropped it
     if not GetDropButton() then
-        return Fail("Egg was already dropped before arriving (not by the script). Stopped.")
+        Log("The egg left me before the drop area.")
+        return "lost"
     end
 
-    -- 2) stop, then Drop
     Log(string.format("Arrived. Waiting %.2fs", CFG.DropDelay))
     SetStatus("Stopped at drop area")
     if CFG.DropDelay > 0 then task.wait(CFG.DropDelay) end
-    if Cancelled(id) then return false end
+    if Cancelled(id) then return nil end
 
-    local btn = WaitFor(GetDropButton, 3, id, 0.03)
-    if not btn then return Fail("Drop button vanished before clicking. Stopped (no spawn walk).") end
+    local btn = WaitFor(GetDropButton, 2, id, 0.03)
+    if not btn then
+        Log("The egg left me while I waited.")
+        return "lost"
+    end
 
-    local dropped = false
     for _ = 1, 10 do
         SetStatus("Clicking Drop")
         ClickGui(btn)
         task.wait(0.1)
-        if not GetDropButton() then dropped = true; break end
+        if not GetDropButton() then
+            Log("Dropped.")
+            return "dropped"
+        end
         btn = GetDropButton() or btn
     end
-    if not dropped then return Fail("Drop not confirmed. Stopped (no spawn walk).") end
-    Log("Dropped.")
+    Fail("Drop not confirmed. Stopped (no spawn walk).")
+    return nil
+end
 
-    -- 3) pick the dropped egg up again: its own prompt, not just any prompt
+-- after the drop: take the dropped egg back before the guard does.
+-- returns "stolen", "returned" (guard/monster took it back to its nest), "cancelled"
+local function StealBackAtDrop(id, uid)
     SetStatus("Waiting for the dropped egg's Steal prompt")
-    local prompt = WaitFor(function()
-        local rec = uid and Eggs[uid]
-        local eggPos = rec and rec.State == "Dropped" and EggPosition(rec)
-        if eggPos then return FindPromptNearPos(eggPos, 6) end
-        local me = Root()
-        return me and FindPromptNearPos(me.Position, 14) or nil
-    end, 6, id, 0.03)
-    if not prompt then return Fail("Steal prompt did not show after Drop. Stopped (no spawn walk).") end
+    local prompt
+    local t0 = os.clock()
+    local dropAt = t0
 
-    local stolen = false
+    while os.clock() - t0 < 6 do
+        if Cancelled(id) then return "cancelled" end
+
+        local rec = uid and Eggs[uid]
+        if EggWentBack(uid, dropAt) then
+            Log("The egg went back to its nest (state " .. tostring(rec.State) .. ").")
+            return "returned"
+        end
+
+        local eggPos = rec and rec.State == "Dropped" and EggPosition(rec)
+        local me = Root()
+        prompt = (eggPos and FindPromptNearPos(eggPos, 6)) or (me and FindPromptNearPos(me.Position, 14))
+        if prompt then break end
+        task.wait(0.03)
+    end
+    if not prompt then return "returned" end
+
     for _ = 1, 6 do
         SetStatus("Clicking Steal")
         FirePrompt(prompt)
-        -- carrying again = the Drop button is back
-        if WaitFor(GetDropButton, 0.6, id, 0.03) then stolen = true; break end
+
+        if WaitFor(GetDropButton, 0.6, id, 0.03) then return "stolen" end
         local rec = uid and Eggs[uid]
-        if rec and tonumber(rec.CarrierUserId) == LocalPlayer.UserId then stolen = true; break end
+        if CarrierIsMe(rec) then return "stolen" end
+        if EggWentBack(uid, dropAt) then return "returned" end
+
         local eggPos = rec and rec.State == "Dropped" and EggPosition(rec)
         prompt = (eggPos and FindPromptNearPos(eggPos, 6)) or prompt
     end
-    if not stolen then return Fail("Second Steal not confirmed. Stopped (no spawn walk).") end
+    return "returned"
+end
+
+-- go back to the egg's own nest and take it again
+local function RecoverEgg(id, origin)
+    SetStatus("Egg went back. Returning for it")
+    Log("Going back to the egg's nest.")
+    if not ApproachTo(origin + Vector3.new(0, 3, 0), id) then return false end
+
+    local prompt = WaitFor(function() return FindPromptNearPos(origin, 4) end, 4, id, 0.05)
+    if not prompt then return false end
+
+    for _ = 1, 6 do
+        FirePrompt(prompt)
+        if WaitFor(GetDropButton, 0.8, id, 0.03) then
+            Log("Took the egg again.")
+            return true
+        end
+    end
+    return false
+end
+
+-- Steal (manual or auto) -> drop area -> Drop -> steal back -> spawn.
+-- If the egg is taken back to its nest, it goes back for it (max CFG.MaxRecoveries times).
+local function RunDropWorkflow(id, originHint, uidHint)
+    local started = os.clock()
+
+    -- the steal must really be registered BEFORE we move
+    if not WaitFor(GetDropButton, 3, id, 0.03) then
+        return Fail("Steal not registered (no Drop button). Not moving.")
+    end
+
+    -- which egg is this?
+    local uid = ((CarriedUidAt >= started - 1) and CarriedUid) or uidHint
+    local rec = uid and Eggs[uid]
+    if rec then
+        Log("Egg: " .. DescribeEgg(rec))
+        SetStatus("Carrying " .. tostring(rec.AssetCategory))
+    end
+    local origin = (uid and NestPos[uid]) or originHint
+
+    local recoveries = 0
+    while true do
+        local dropped = DropAtArea(id)
+        if dropped == nil then return false end
+
+        local outcome = "returned"
+        if dropped == "dropped" then
+            outcome = StealBackAtDrop(id, uid)
+            if outcome == "cancelled" then return false end
+        end
+
+        if outcome == "stolen" then break end
+
+        -- the monster/guard took the egg back to where it was stolen
+        if not origin or recoveries >= CFG.MaxRecoveries then
+            return Fail("Egg delivery failed (it keeps returning to its nest).")
+        end
+        recoveries += 1
+        Log("Recovery " .. recoveries .. " of " .. CFG.MaxRecoveries)
+        if not RecoverEgg(id, origin) then
+            return Fail("Egg delivery failed (could not take the egg back).")
+        end
+    end
+
     Log("Stole it back.")
 
-    -- 4) walk to SpawnLocation
+    -- walk to SpawnLocation
     local arrived = WalkToSpawn(id)
     if arrived then
         SetStatus("Done: reached SpawnLocation")
@@ -650,8 +787,13 @@ local function IngestEgg(rec, depth)
     if type(rec.Uid) == "string" then
         local isNew = Eggs[rec.Uid] == nil
         Eggs[rec.Uid] = rec
+        EggSeenAt[rec.Uid] = os.clock()
         if tonumber(rec.CarrierUserId) == LocalPlayer.UserId then
             CarriedUid, CarriedUidAt = rec.Uid, os.clock()
+        end
+        if rec.State == "Slot" then
+            local np = EggPosition(rec)
+            if np then NestPos[rec.Uid] = np end
         end
         pcall(OnEggSeen, rec, isNew)
         return
@@ -711,8 +853,10 @@ local function EnsureListeners()
         if InstantSteal and not Busy and IsStealPrompt(prompt) then
             Busy = true
             local id = NewJob()
+            local origin = PromptPosition(prompt)
+            local uid0 = origin and UidAtPos(origin)
             task.spawn(function()
-                local ok, err = pcall(RunDropWorkflow, id)
+                local ok, err = pcall(RunDropWorkflow, id, origin, uid0)
                 if not ok then Notify("Steal", "Workflow error: " .. tostring(err), "error", 4) end
                 Busy = false
             end)
@@ -841,6 +985,11 @@ local function ResolveRarity(rec)
 
     if found then RarityCache[category] = found end
     return found, note
+end
+
+DescribeEgg = function(rec)
+    local rarity = ResolveRarity(rec)
+    return string.format("%s | %s | %s", tostring(rec.AssetCategory), tostring(rec.AreaId), rarity or "rarity?")
 end
 
 local function RarityFilterOn()
@@ -999,8 +1148,8 @@ local function RunAutoSteal(egg, id)
 
     GetOffTreadmill()
 
-    -- 1) tween to the egg
-    if not TweenVerified(egg.Pos + Vector3.new(0, 3, 0), id) then return false end
+    -- 1) approach the egg in short bursts (anti-cheat friendly)
+    if not ApproachTo(egg.Pos + Vector3.new(0, 3, 0), id) then return false end
 
     -- 2) the prompt that belongs to THIS egg only
     local prompt = WaitFor(function() return FindPromptNearPos(egg.Pos, 4) end, 3, id, 0.05)
@@ -1035,7 +1184,7 @@ local function RunAutoSteal(egg, id)
     Log("Stole the target egg.")
 
     -- 4) same workflow as Instant Steal: drop area -> stop -> Drop -> steal back -> spawn
-    return RunDropWorkflow(id)
+    return RunDropWorkflow(id, egg.Pos, egg.Uid)
 end
 
 --==============================================================
@@ -1108,6 +1257,63 @@ local function ApplySpeed()
     if h and not SpeedOverride then h.WalkSpeed = DesiredWalkSpeed() end
 end
 
+-- Anti Ragdoll (also stops knockback/flinging): several layers, because the game's bats,
+-- monsters and traps can push you in different ways.
+local BAD_MOVERS = {
+    "BodyVelocity", "BodyForce", "BodyAngularVelocity", "BodyThrust", "RocketPropulsion",
+    "LinearVelocity", "VectorForce", "AngularVelocity", "Torque", "BallSocketConstraint",
+}
+
+local function IsBadMover(inst)
+    for _, className in ipairs(BAD_MOVERS) do
+        if inst:IsA(className) then return true end
+    end
+    return false
+end
+
+local RagdollAddedConn
+
+local function SetRagdollStates(h, enabled)
+    for _, st in ipairs({ Enum.HumanoidStateType.Ragdoll, Enum.HumanoidStateType.FallingDown }) do
+        pcall(function() h:SetStateEnabled(st, enabled) end)
+    end
+end
+
+local function CleanCharacter(c)
+    for _, d in ipairs(c:GetDescendants()) do
+        if IsBadMover(d) then
+            pcall(function() d:Destroy() end)
+        elseif d:IsA("Motor6D") and not d.Enabled then
+            pcall(function() d.Enabled = true end)
+        end
+    end
+end
+
+local function HookRagdoll()
+    if RagdollAddedConn then RagdollAddedConn:Disconnect(); RagdollAddedConn = nil end
+    local c = Char()
+    if not c then return end
+    local h = Hum()
+    if h then SetRagdollStates(h, false) end
+    CleanCharacter(c)
+    RagdollAddedConn = c.DescendantAdded:Connect(function(d)
+        if AntiRagdoll and IsBadMover(d) then
+            task.defer(function() pcall(function() d:Destroy() end) end)
+        end
+    end)
+end
+
+local function SetAntiRagdoll(on)
+    AntiRagdoll = on
+    if on then
+        HookRagdoll()
+    else
+        if RagdollAddedConn then RagdollAddedConn:Disconnect(); RagdollAddedConn = nil end
+        local h = Hum()
+        if h then SetRagdollStates(h, true) end
+    end
+end
+
 Track(RunService.Heartbeat:Connect(function()
     -- everything here is a no-op until you switch the matching toggle on
     if SpeedAdjust and not SpeedOverride then
@@ -1116,24 +1322,29 @@ Track(RunService.Heartbeat:Connect(function()
     end
 
     if AntiRagdoll then
-        local h = Hum()
-        if h then
-            local s = h:GetState()
-            if s == Enum.HumanoidStateType.Ragdoll or s == Enum.HumanoidStateType.FallingDown
-                or s == Enum.HumanoidStateType.Physics then
+        local h, r = Hum(), Root()
+        if h and r then
+            local st = h:GetState()
+            if st == Enum.HumanoidStateType.Ragdoll or st == Enum.HumanoidStateType.FallingDown
+                or st == Enum.HumanoidStateType.Physics then
                 h:ChangeState(Enum.HumanoidStateType.GettingUp)
             end
             if h.PlatformStand then h.PlatformStand = false end
-        end
-    end
 
-    if AntiFling and not Busy then
-        local r = Root()
-        if r then
-            local v = r.AssemblyLinearVelocity
-            if v.Magnitude > math.max(150, CFG.PlayerSpeed * 2.5) then
-                r.AssemblyLinearVelocity = Vector3.zero
-                r.AssemblyAngularVelocity = Vector3.zero
+            -- the script's own tweens/walks are skipped
+            if not Busy and not SpeedOverride then
+                local v = r.AssemblyLinearVelocity
+                local limit = math.max(150, h.WalkSpeed * 1.5)
+                local flat = Vector3.new(v.X, 0, v.Z)
+                if flat.Magnitude > limit then
+                    local dir = flat.Unit
+                    r.AssemblyLinearVelocity = Vector3.new(dir.X * limit, math.min(v.Y, 60), dir.Z * limit)
+                elseif v.Y > 90 then
+                    r.AssemblyLinearVelocity = Vector3.new(v.X, 0, v.Z)
+                end
+                if r.AssemblyAngularVelocity.Magnitude > 25 then
+                    r.AssemblyAngularVelocity = Vector3.zero
+                end
             end
         end
     end
@@ -1149,7 +1360,8 @@ Track(RunService.Stepped:Connect(function()
         end
     end
 
-    if AntiFling then
+    -- other players can't push you: their bodies stop colliding with yours
+    if AntiRagdoll then
         for _, plr in ipairs(Players:GetPlayers()) do
             if plr ~= LocalPlayer and plr.Character then
                 for _, part in ipairs(plr.Character:GetChildren()) do
@@ -1175,6 +1387,7 @@ Track(LocalPlayer.CharacterAdded:Connect(function()
     SpeedOverride = false
     task.wait(1)
     ApplySpeed()
+    if AntiRagdoll then HookRagdoll() end
 end))
 
 -- Anti AFK (connected only while its toggle is on)
@@ -1194,65 +1407,100 @@ local function SetAntiAfk(on)
     end
 end
 
+-- Auto Execute: re-runs this script (from your hosted URL) in the next server
+local AUTO_EXECUTE_URL = "https://raw.githubusercontent.com/DevNameGelo/rap-rage/refs/heads/main/script.lua"
+local AutoExecuteOn = false
+local QueuedThisSession = false
+local OnTeleportConn, TeleportFailConn
+
+local function QueueAutoExecute()
+    if QueuedThisSession then return true end
+    local queue = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+    if not queue then
+        Notify("Auto Execute", "Your executor has no queue_on_teleport.", "error", 4)
+        return false
+    end
+    local code = string.format(
+        "if not game:IsLoaded() then game.Loaded:Wait() end task.wait(2) loadstring(game:HttpGet(%q))()",
+        AUTO_EXECUTE_URL
+    )
+    local ok = pcall(queue, code)
+    if ok then QueuedThisSession = true end
+    return ok
+end
+
+local function SetAutoExecute(on)
+    AutoExecuteOn = on
+    if on then
+        if QueueAutoExecute() then Notify("Auto Execute", "Queued for the next teleport / rejoin.", "success", 3) end
+        if not OnTeleportConn then
+            -- the queue is used up when a teleport starts
+            OnTeleportConn = LocalPlayer.OnTeleport:Connect(function(state)
+                if state == Enum.TeleportState.Started or state == Enum.TeleportState.InProgress then
+                    QueuedThisSession = true
+                end
+            end)
+        end
+        if not TeleportFailConn then
+            -- teleport failed: we're still here, so queue again
+            TeleportFailConn = TeleportService.TeleportInitFailed:Connect(function()
+                QueuedThisSession = false
+                if AutoExecuteOn then pcall(QueueAutoExecute) end
+            end)
+        end
+    else
+        if OnTeleportConn then OnTeleportConn:Disconnect(); OnTeleportConn = nil end
+        if TeleportFailConn then TeleportFailConn:Disconnect(); TeleportFailConn = nil end
+    end
+end
+
 -- Auto Reconnect (connected only while its toggle is on)
 local ReconnectConns = {}
-local ReconnectAttempts = 0
+local Rejoining = false
+
 local function TryRejoin()
-    if ReconnectAttempts >= 5 or Unloaded then return end
-    ReconnectAttempts += 1
-    task.wait(2)
-    pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+    if Unloaded or Rejoining then return end
+    Rejoining = true
+    for attempt = 1, 8 do
+        if Unloaded then break end
+        task.wait(attempt == 1 and 2 or 5)
+        if AutoExecuteOn then pcall(QueueAutoExecute) end
+        pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+        task.wait(10)   -- still here? try again
+    end
+    Rejoining = false
 end
 
 local function SetAutoReconnect(on)
     for _, c in ipairs(ReconnectConns) do pcall(function() c:Disconnect() end) end
     table.clear(ReconnectConns)
-    ReconnectAttempts = 0
     if not on then return end
 
+    -- 1) the game shows an error message (kick / disconnect)
     table.insert(ReconnectConns, GuiService.ErrorMessageChanged:Connect(function(msg)
         if msg and msg ~= "" then task.spawn(TryRejoin) end
     end))
+
+    -- 2) Roblox's error prompt appears
     pcall(function()
         local overlay = game:GetService("CoreGui").RobloxPromptGui.promptOverlay
         table.insert(ReconnectConns, overlay.ChildAdded:Connect(function(child)
             if child.Name == "ErrorPrompt" then task.spawn(TryRejoin) end
         end))
     end)
-end
 
--- Auto Execute (re-runs a hosted copy of this script after you teleport/rejoin)
-local ScriptUrl = ""
-local AutoExecuteOn = false
-local OnTeleportConn
+    -- 3) the connection to the server is lost
+    pcall(function()
+        local client = game:GetService("NetworkClient")
+        table.insert(ReconnectConns, client.ChildRemoved:Connect(function()
+            task.spawn(TryRejoin)
+        end))
+    end)
 
-local function QueueAutoExecute()
-    local queue = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
-    if not queue then
-        Notify("Auto Execute", "Your executor has no queue_on_teleport.", "error", 4)
-        return false
-    end
-    if ScriptUrl == "" then
-        Notify("Auto Execute", "Paste a raw script URL first.", "warning", 4)
-        return false
-    end
-    queue(string.format("loadstring(game:HttpGet(%q))()", ScriptUrl))
-    return true
-end
-
-local function SetAutoExecute(on)
-    AutoExecuteOn = on
-    if on then
-        if QueueAutoExecute() then Notify("Auto Execute", "Queued for the next teleport.", "success", 3) end
-        if not OnTeleportConn then
-            OnTeleportConn = LocalPlayer.OnTeleport:Connect(function()
-                if AutoExecuteOn then pcall(QueueAutoExecute) end
-            end)
-        end
-    elseif OnTeleportConn then
-        OnTeleportConn:Disconnect()
-        OnTeleportConn = nil
-    end
+    -- 4) a teleport failed
+    table.insert(ReconnectConns, TeleportService.TeleportInitFailed:Connect(function()
+        task.spawn(TryRejoin)
+    end))
 end
 
 --==============================================================
@@ -1264,12 +1512,14 @@ Window = RageHub:CreateWindow({
     Subtitle = "Steal An Egg",
     Theme = "Rage",
     Features = { Notifications = true },
-    ConfigFolder = "RageHub/StealAnEgg_v7",
+    ConfigFolder = "RageHub/StealAnEgg",
+    AutoSave = "autosave",
     Splash = true,
     OnUnload = function()
         Unloaded = true
         InstantSteal, AutoSteal, AutoTreadmill = false, false, false
-        SpeedAdjust, InfiniteJump, Noclip, AntiRagdoll, AntiFling = false, false, false, false, false
+        SpeedAdjust, InfiniteJump, Noclip = false, false, false
+        SetAntiRagdoll(false)
         EggAlert, AutoEquipBest, AutoClaimAway = false, false, false
         Job += 1
         StopTween()
@@ -1285,6 +1535,13 @@ Window = RageHub:CreateWindow({
     end,
 })
 
+-- only one copy at a time (re-executing replaces the old one)
+local Env = (getgenv and getgenv()) or _G
+if Env.__RageHubStealAnEgg and Env.__RageHubStealAnEgg ~= Window then
+    pcall(function() Env.__RageHubStealAnEgg:Destroy() end)
+end
+Env.__RageHubStealAnEgg = Window
+
 local StealTab = Window:CreateTab("Steal", "🥚")
 local PlayerTab = Window:CreateTab("Player", "🏃")
 local OthersTab = Window:CreateTab("Others", "🧰")
@@ -1299,7 +1556,7 @@ StatusLabel = StatusSection:CreateLabel("Status: Idle (everything is OFF)")
 local InstantSection = StealTab:CreateSection("Instant Steal")
 
 InstantSection:CreateToggle({
-    Name = "Instant Steal", Default = false,
+    Name = "Instant Steal", Flag = "InstantSteal", Default = false,
     Description = "One click on Steal, then the drop-area workflow",
     Callback = function(on)
         InstantSteal = on
@@ -1329,7 +1586,7 @@ InstantSection:CreateDropdown({
 local TreadmillSection = StealTab:CreateSection("Auto Treadmill")
 
 TreadmillSection:CreateToggle({
-    Name = "Auto Treadmill", Default = false,
+    Name = "Auto Treadmill", Flag = "AutoTreadmill", Default = false,
     Description = "Finds YOUR treadmill, stays on it, returns if you leave",
     Callback = function(on)
         AutoTreadmill = on
@@ -1348,7 +1605,7 @@ TreadmillSection:CreateToggle({
 local AutoSection = StealTab:CreateSection("Auto Steal + Filter")
 
 AutoSection:CreateToggle({
-    Name = "Auto Steal (Filtered)", Default = false,
+    Name = "Auto Steal (Filtered)", Flag = "AutoSteal", Default = false,
     Description = "Tween to a matching egg, steal it, same workflow",
     Callback = function(on)
         AutoSteal = on
@@ -1391,13 +1648,13 @@ AutoSection:CreateDropdown({
 })
 
 AutoSection:CreateToggle({
-    Name = "Allow Unknown Rarity", Default = false,
+    Name = "Allow Unknown Rarity", Flag = "AllowUnknownRarity", Default = false,
     Description = "Also take eggs whose rarity can't be read",
     Callback = function(on) AllowUnknownRarity = on end,
 })
 
 AutoSection:CreateToggle({
-    Name = "Egg Alert", Default = false,
+    Name = "Egg Alert", Flag = "EggAlert", Default = false,
     Description = "Notify when a matching egg spawns (no moving)",
     Callback = function(on)
         EggAlert = on
@@ -1416,8 +1673,20 @@ ScanLog = AutoSection:CreateLog({ Name = "Scan Report", Height = 150, MaxLines =
 local MoveSection = StealTab:CreateSection("Movement")
 
 MoveSection:CreateSlider({
-    Name = "Travel Speed", Flag = "TravelSpeed", Range = { 50, 1500 }, Increment = 25, Default = CFG.TravelSpeed,
+    Name = "Treadmill Travel Speed", Flag = "TravelSpeed", Range = { 50, 1500 }, Increment = 25, Default = CFG.TravelSpeed,
     Suffix = " studs/s", Callback = function(v) CFG.TravelSpeed = v end,
+})
+
+MoveSection:CreateSlider({
+    Name = "Approach Speed", Flag = "ApproachSpeed", Range = { 100, 1500 }, Increment = 25, Default = CFG.ApproachSpeed,
+    Suffix = " studs/s", Description = "Auto Steal: speed toward the egg",
+    Callback = function(v) CFG.ApproachSpeed = v end,
+})
+
+MoveSection:CreateSlider({
+    Name = "Approach Pause", Flag = "ApproachPause", Range = { 0, 1 }, Increment = 0.05, Default = CFG.ApproachPause,
+    Suffix = " s", Description = "Pause between bursts (anti-cheat friendly)",
+    Callback = function(v) CFG.ApproachPause = v end,
 })
 
 MoveSection:CreateSlider({
@@ -1456,7 +1725,7 @@ MoveSection:CreateButton({
 local MovementSection = PlayerTab:CreateSection("Movement")
 
 MovementSection:CreateToggle({
-    Name = "Speed Adjust", Default = false,
+    Name = "Speed Adjust", Flag = "SpeedAdjust", Default = false,
     Description = "Sets your WalkSpeed to the slider value",
     Callback = function(on) SpeedAdjust = on; ApplySpeed() end,
 })
@@ -1467,54 +1736,38 @@ MovementSection:CreateSlider({
 })
 
 MovementSection:CreateToggle({
-    Name = "Infinite Jump", Default = false,
+    Name = "Infinite Jump", Flag = "InfiniteJump", Default = false,
     Callback = function(on) InfiniteJump = on end,
 })
 
 MovementSection:CreateToggle({
-    Name = "Noclip", Default = false,
+    Name = "Noclip", Flag = "Noclip", Default = false,
     Callback = function(on) Noclip = on end,
 })
 
 local ProtectSection = PlayerTab:CreateSection("Protection")
 
 ProtectSection:CreateToggle({
-    Name = "Anti Ragdoll", Default = false,
-    Description = "Gets you back up when you are knocked down",
-    Callback = function(on) AntiRagdoll = on end,
-})
-
-ProtectSection:CreateToggle({
-    Name = "Anti Fling", Default = false,
-    Description = "Stops other players from pushing/flinging you",
-    Callback = function(on) AntiFling = on end,
+    Name = "Anti Ragdoll", Flag = "AntiRagdoll", Default = false,
+    Description = "Blocks ragdoll, knockback and flinging",
+    Callback = function(on) SetAntiRagdoll(on) end,
 })
 
 local SessionSection = PlayerTab:CreateSection("Session")
 
 SessionSection:CreateToggle({
-    Name = "Anti AFK", Default = false,
+    Name = "Anti AFK", Flag = "AntiAFK", Default = false,
     Callback = function(on) SetAntiAfk(on) end,
 })
 
 SessionSection:CreateToggle({
-    Name = "Auto Reconnect", Default = false,
+    Name = "Auto Reconnect", Flag = "AutoReconnect", Default = false,
     Description = "Rejoins if you get disconnected",
     Callback = function(on) SetAutoReconnect(on) end,
 })
 
-SessionSection:CreateInput({
-    Name = "Script URL (for Auto Execute)", Default = "", Width = 300,
-    Placeholder = "https://raw.githubusercontent.com/you/repo/main/script.lua", Clearable = true,
-    Description = "Host this script first, then paste its raw link",
-    Callback = function(v)
-        ScriptUrl = tostring(v or "")
-        if AutoExecuteOn then QueueAutoExecute() end
-    end,
-})
-
 SessionSection:CreateToggle({
-    Name = "Auto Execute", Default = false,
+    Name = "Auto Execute", Flag = "AutoExecute", Default = false,
     Description = "Re-runs the script after teleport / rejoin",
     Callback = function(on) SetAutoExecute(on) end,
 })
@@ -1567,7 +1820,7 @@ local function StartMaintLoop()
 end
 
 FarmSection:CreateToggle({
-    Name = "Auto Equip Best", Default = false,
+    Name = "Auto Equip Best", Flag = "AutoEquipBest", Default = false,
     Description = "Calls the game's Equip Best every interval",
     Callback = function(on) AutoEquipBest = on; LastEquip = 0; if on then StartMaintLoop() end end,
 })
@@ -1578,7 +1831,7 @@ FarmSection:CreateSlider({
 })
 
 FarmSection:CreateToggle({
-    Name = "Auto Claim Away Earnings", Default = false,
+    Name = "Auto Claim Away Earnings", Flag = "AutoClaimAway", Default = false,
     Description = "Claims offline earnings every interval",
     Callback = function(on) AutoClaimAway = on; LastClaim = 0; if on then StartMaintLoop() end end,
 })
@@ -1612,6 +1865,24 @@ QuickSection:CreateButton({
 
 local ScriptSection = OthersTab:CreateSection("Script")
 
+ScriptSection:CreateToggle({
+    Name = "Auto Save Config", Flag = "AutoSaveConfig", Default = true,
+    Description = "Saves everything; restored on rejoin / auto execute",
+    Callback = function(on)
+        AutoSaveOn = on
+        pcall(function() Window.AutoSaveName = on and "autosave" or nil end)
+    end,
+})
+
+ScriptSection:CreateButton({
+    Name = "Reset Saved Config", ButtonText = "Reset",
+    Description = "Deletes the saved config (toggles start OFF next time)",
+    Callback = function()
+        pcall(function() Window:DeleteConfig("autosave") end)
+        Notify("Config", "Saved config deleted.", "success", 3)
+    end,
+})
+
 ScriptSection:CreateButton({
     Name = "Unload Script", ButtonText = "Unload",
     Description = "Stops everything and removes the UI",
@@ -1623,4 +1894,13 @@ OthersTab:CreateSection("Needs a spy log"):CreateParagraph({
     Content = "Your logs have no calls for these, and guessing remote arguments is how you get kicked (this game has an anti-cheat that probes the client). Record a spy log while you do each one once and they can be added.",
 })
 
-Notify("Rage Hub", "Loaded. Everything is OFF until you turn it on.", "success", 4)
+Notify("Rage Hub", "Loaded.", "success", 3)
+
+-- restore your saved config (filters + any toggles that were ON turn back on by themselves)
+task.delay(1.2, function()
+    if Unloaded then return end
+    local ok, loaded = pcall(function() return Window:LoadConfig() end)
+    if ok and loaded then
+        Notify("Config", "Saved config restored.", "success", 3)
+    end
+end)
