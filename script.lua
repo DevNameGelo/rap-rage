@@ -49,6 +49,17 @@ local BIOMES = {
 }
 
 -- Only used if the game's own asset module can't be read.
+-- Guard data from the game's own attributes (GuardEscapeSpeeds = speed stat needed, guard run speed)
+local GUARD = {
+    ["Forest"] = { need = 11, run = 11.6 }, ["Lake"] = { need = 900, run = 24.3 },
+    ["Desert"] = { need = 10000, run = 48.4 }, ["Jungle"] = { need = 40000, run = 65.6 },
+    ["Snow"] = { need = 170000, run = 83.8 }, ["Abyss Ocean"] = { need = 2500000, run = 117.4 },
+    ["Volcano"] = { need = 700000, run = 102.0 }, ["Prehistoric"] = { need = 18000000, run = 143.2 },
+    ["Cosmic"] = { need = 700000000, run = 187.9 }, ["Cherry Blossom"] = { need = 2500000000, run = 205.7 },
+    ["Titan Temple"] = { need = 7000000000, run = 217.8 }, ["Light Dark"] = { need = 20000000000, run = 231.9 },
+    ["Enchanted Forest"] = { need = 49999998976, run = 242.4 },
+}
+
 local NAME_RARITY_FALLBACK = {
     { "eternal lunar dragon", "Eternal" }, { "el maja", "Eternal" }, { "oni tiger", "Eternal" },
     { "gorilla king", "Eternal" }, { "pegasus", "Eternal" }, { "skeleton horse", "Eternal" },
@@ -63,15 +74,12 @@ local NAME_RARITY_FALLBACK = {
 
 local CFG = {
     TravelSpeed = 500,        -- studs/s for tween trips
-    SpawnWalkSpeed = 200,     -- WalkSpeed while walking to SpawnLocation (same as your working file; slider goes higher)
     SupportOffset = 3,        -- stand this many studs above the Lake drop point
     LakeTweenSeconds = 0.8,   -- MAX tween time to the drop area (far trips take this long at most)
     DropTweenSpeed = 1000,    -- studs/s: near trips are faster than the max time (adaptive)
     MinTween = 0.2,           -- never faster than this
     DropDelay = 0.5,          -- stop at the drop area this long before clicking Drop
-    ApproachSpeed = 400,      -- Auto Steal: speed of each burst toward the egg
-    ApproachBurst = 0.8,      -- Auto Steal: max seconds of one burst
-    ApproachPause = 0.3,      -- Auto Steal: pause between bursts (anti-cheat friendly)
+    ApproachSpeed = 800,      -- one fast, uninterrupted tween toward an egg (studs/s)
     MaxRecoveries = 2,        -- times it goes back for an egg the guard returned to its nest
     EquipInterval = 30,
     ClaimInterval = 120,
@@ -86,6 +94,11 @@ local InfiniteJump = false
 local Noclip = false
 local AntiRagdoll = false
 local AutoSaveOn = true
+local CameraFocus = true         -- camera watches the egg area instead of following you during a steal
+local UseDecoy = true            -- carry a Forest egg to the target, swap it for the target egg
+local SkipDangerous = false      -- skip eggs whose guard you cannot outrun
+local GetDropButton = function() return nil end
+local CamLocked, CamCFrame = false, nil
 
 local SelectedRarities = {}   -- set; empty or all = any
 local SelectedBiomes = {}     -- set (normalized names); empty or all = any
@@ -104,6 +117,7 @@ local CarriedUidAt = 0
 local NestPos = {}               -- uid -> where that egg's nest is
 local EggSeenAt = {}             -- uid -> when the server last updated that egg
 local DescribeEgg = function() return "egg" end
+local GuardDanger = function() return false end
 local Priority = "Highest Rarity"
 
 local Unloaded = false
@@ -197,7 +211,30 @@ local function StopTween()
     if ActiveTween then pcall(function() ActiveTween:Cancel() end); ActiveTween = nil end
 end
 
-local function TweenTo(pos, id, duration)
+-- Camera: stays on the egg area while your character moves, follows you again once it is safe
+local function CamLock(pos)
+    if not CameraFocus or not pos then return end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    CamCFrame = CFrame.lookAt(pos + Vector3.new(0, 16, 24), pos)
+    CamLocked = true
+    cam.CameraType = Enum.CameraType.Scriptable
+    cam.CFrame = CamCFrame
+end
+
+local function CamRelease()
+    if not CamLocked then return end
+    CamLocked, CamCFrame = false, nil
+    local cam = workspace.CurrentCamera
+    if cam then
+        local h = Hum()
+        if h then cam.CameraSubject = h end
+        cam.CameraType = Enum.CameraType.Custom
+    end
+end
+
+-- tween; with mustCarry it stops at once if the egg is taken from you (guard hit)
+local function TweenTo(pos, id, duration, mustCarry)
     local r = Root()
     if not r then return false end
     local dist = (r.Position - pos).Magnitude
@@ -217,7 +254,12 @@ local function TweenTo(pos, id, duration)
         if Cancelled(id) or os.clock() - t0 > seconds + 5 then
             pcall(function() tween:Cancel() end)
             ActiveTween = nil
-            return false
+            return false, "cancelled"
+        end
+        if mustCarry and os.clock() - t0 > 0.35 and not GetDropButton() then
+            pcall(function() tween:Cancel() end)
+            ActiveTween = nil
+            return false, "lost"
         end
         task.wait()
     end
@@ -229,76 +271,26 @@ local function TweenTo(pos, id, duration)
 end
 
 -- "100%": re-tween until we really are at the target (up to 3 attempts)
-local function TweenVerified(pos, id, duration)
+local function TweenVerified(pos, id, duration, mustCarry)
     for attempt = 1, 3 do
-        if TweenTo(pos, id, attempt == 1 and duration or nil) then return true end
-        if Cancelled(id) then return false end
+        local ok, why = TweenTo(pos, id, attempt == 1 and duration or nil, mustCarry)
+        if ok then return true end
+        if why == "lost" then return false, "lost" end
+        if Cancelled(id) then return false, "cancelled" end
     end
     return false
 end
 
--- Approach used by Auto Steal / egg recovery: short bursts with a pause between them,
--- so the character is never moving fast for one long continuous stretch.
-local function ApproachTo(pos, id)
-    for _ = 1, 60 do
-        if Cancelled(id) then return false end
-        local r = Root()
-        if not r then return false end
-
-        local offset = pos - r.Position
-        local dist = offset.Magnitude
-        if dist <= 3 then return true end
-
-        local step = math.min(dist, CFG.ApproachSpeed * CFG.ApproachBurst)
-        local nextPos = r.Position + offset.Unit * step
-        TweenTo(nextPos, id, math.max(0.1, step / CFG.ApproachSpeed))
-        if Cancelled(id) then return false end
-
-        local r2 = Root()
-        if r2 and (r2.Position - pos).Magnitude > 3 then
-            task.wait(CFG.ApproachPause)
-        end
-    end
+-- one fast tween without stopping (no stop-and-go)
+local function ApproachTween(pos, id, mustCarry)
     local r = Root()
-    return r ~= nil and (r.Position - pos).Magnitude <= 4
+    if not r then return false end
+    local seconds = math.max(0.12, (r.Position - pos).Magnitude / CFG.ApproachSpeed)
+    return TweenVerified(pos, id, seconds, mustCarry)
 end
 
 local function DesiredWalkSpeed()
     return SpeedAdjust and CFG.PlayerSpeed or 16
-end
-
-local function WalkToSpawn(id)
-    local spawn = workspace:FindFirstChild("SpawnLocation")
-    local hum = Hum()
-    if not spawn or not hum then
-        Notify("Steal", "SpawnLocation or Humanoid not found.", "error")
-        return false
-    end
-
-    local original = hum.WalkSpeed
-    SpeedOverride = true
-    hum.WalkSpeed = CFG.SpawnWalkSpeed
-    SetStatus("Walking to SpawnLocation (" .. CFG.SpawnWalkSpeed .. ")")
-
-    local target = Vector3.new(spawn.Position.X, spawn.Position.Y + 2, spawn.Position.Z)
-    local arrived = false
-    local t0 = os.clock()
-
-    while os.clock() - t0 < 45 do
-        if Cancelled(id) then break end
-        local r, h = Root(), Hum()
-        if not r or not h then break end
-        if (r.Position - target).Magnitude <= 6 then arrived = true; break end
-        h:MoveTo(target)       -- re-issued; MoveTo times out after a few seconds
-        task.wait(0.2)
-    end
-
-    SpeedOverride = false
-    local h = Hum()
-    if h then
-        h.WalkSpeed = SpeedAdjust and CFG.PlayerSpeed or original
-    end
-    return arrived
 end
 
 --==============================================================
@@ -369,7 +361,7 @@ local function GuiVisible(obj)
     return obj and obj.AbsoluteSize.X > 0
 end
 
-local function GetDropButton()
+GetDropButton = function()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     local gui = pg and pg:FindFirstChild("DropHeldEgg")
     local btn = gui and gui:FindFirstChild("Button")
@@ -539,6 +531,126 @@ local function EggWentBack(uid, since)
         and (rec.State == "GuardCarried" or rec.State == "Slot")
 end
 
+-- wait until a ragdoll / knock-down is over
+local function WaitStable(id, extra)
+    local t0 = os.clock()
+    while os.clock() - t0 < 4 do
+        if Cancelled(id) then return end
+        local h, r = Hum(), Root()
+        if not h or not r then return end
+        local st = h:GetState()
+        local down = h.PlatformStand or st == Enum.HumanoidStateType.Ragdoll
+            or st == Enum.HumanoidStateType.FallingDown or st == Enum.HumanoidStateType.Physics
+            or r.AssemblyLinearVelocity.Magnitude > 150
+        if not down then break end
+        task.wait(0.1)
+    end
+    task.wait(extra or 0.2)
+end
+
+-- click the HUD Drop button until the egg is really gone from you
+local function DropHeld(id)
+    local btn = WaitFor(GetDropButton, 2, id, 0.03)
+    if not btn then return false end
+    for _ = 1, 10 do
+        ClickGui(btn)
+        task.wait(0.1)
+        if not GetDropButton() then return true end
+        btn = GetDropButton() or btn
+    end
+    return false
+end
+
+-- steal THE egg at `pos` (its own prompt only). true, or false + reason
+local function StealAt(pos, uid, id)
+    local prompt = WaitFor(function() return FindPromptNearPos(pos, 4) end, 2.5, id, 0.03)
+    if not prompt then return false, "no prompt at that egg (gone?)" end
+
+    for _ = 1, 8 do
+        FirePrompt(prompt)
+        local deadline = os.clock() + 0.5
+        repeat
+            if uid and CarrierIsMe(Eggs[uid]) then return true end
+            if GetDropButton() and (not prompt.Parent or not prompt.Enabled) then return true end
+            task.wait(0.02)
+        until os.clock() > deadline or Cancelled(id)
+        if Cancelled(id) then return false, "cancelled" end
+        if GetDropButton() then return false, "picked a different egg" end
+    end
+    return false, "steal did not register"
+end
+
+-- nearest Forest egg that can be used as the carried "decoy"
+local function PickForestDecoy(excludeUid)
+    local r = Root()
+    if not r then return nil end
+    local best, bestDist
+    for uid, rec in pairs(Eggs) do
+        if uid ~= excludeUid and rec.State == "Slot" and tostring(rec.AreaId) == "Forest"
+            and (AttemptedUntil[uid] or 0) < os.clock() then
+            local pos = EggPosition(rec)
+            if pos then
+                local d = (pos - r.Position).Magnitude
+                if not bestDist or d < bestDist then best, bestDist = { Uid = uid, Pos = pos }, d end
+            end
+        end
+    end
+    return best
+end
+
+-- Get a specific egg: (optional) take a Forest egg first, carry it to the target without stopping,
+-- drop it there and steal the right egg.
+local function GetEggBack(id, uid, origin)
+    WaitStable(id, 1.0)
+    if Cancelled(id) then return false end
+
+    -- never start while holding something
+    if GetDropButton() then DropHeld(id) end
+
+    local rec = uid and Eggs[uid]
+    local area = rec and tostring(rec.AreaId) or nil
+    local targetStand = origin + Vector3.new(0, 3, 0)
+
+    if UseDecoy and area ~= "Forest" then
+        local decoy = PickForestDecoy(uid)
+        if decoy then
+            SetStatus("Taking a Forest egg first")
+            Log("Decoy: taking a Forest egg first.")
+            local okA = ApproachTween(decoy.Pos + Vector3.new(0, 3, 0), id, false)
+            if okA then
+                AttemptedUntil[decoy.Uid] = os.clock() + 25
+                local okB = StealAt(decoy.Pos, decoy.Uid, id)
+                if okB then
+                    SetStatus("Carrying the Forest egg to the target")
+                    -- one fast tween without stopping; land a few studs beside the target nest
+                    local okC = ApproachTween(origin + Vector3.new(0, 3, 5), id, true)
+                    if okC then
+                        if DropHeld(id) then Log("Dropped the Forest egg at the target.") end
+                    else
+                        Log("Lost the Forest egg on the way; going straight to the target.")
+                    end
+                end
+            end
+        end
+    end
+
+    if Cancelled(id) then return false end
+
+    local r = Root()
+    if r and (r.Position - targetStand).Magnitude > 4 then
+        SetStatus("Going to the target egg")
+        if not ApproachTween(targetStand, id, false) then
+            return Fail("Could not reach the target egg.")
+        end
+    end
+
+    SetStatus("Stealing the target egg")
+    local ok, why = StealAt(origin, uid, id)
+    if not ok then return Fail("Target egg not stolen: " .. tostring(why)) end
+    Log("Took the target egg.")
+    return true
+end
+
 -- carry the egg to the drop area, stop, click Drop.
 -- returns "dropped", "lost" (egg left you before the drop) or nil (hard failure)
 local function DropAtArea(id)
@@ -552,7 +664,13 @@ local function DropAtArea(id)
     local seconds = DropTweenSeconds((r.Position - target).Magnitude)
     SetStatus(string.format("Tweening to %s (%.2fs)", DropArea, seconds))
     Log(string.format("Tween to %s in %.2fs", DropArea, seconds))
-    if not TweenVerified(target, id, seconds) then
+
+    local ok, why = TweenVerified(target, id, seconds, true)
+    if not ok then
+        if why == "lost" then
+            Log("The egg was taken from me on the way.")
+            return "lost"
+        end
         Fail("Could not reach the drop area. Stopped.")
         return nil
     end
@@ -566,24 +684,17 @@ local function DropAtArea(id)
     SetStatus("Stopped at drop area")
     if CFG.DropDelay > 0 then task.wait(CFG.DropDelay) end
     if Cancelled(id) then return nil end
-
-    local btn = WaitFor(GetDropButton, 2, id, 0.03)
-    if not btn then
+    if not GetDropButton() then
         Log("The egg left me while I waited.")
         return "lost"
     end
 
-    for _ = 1, 10 do
-        SetStatus("Clicking Drop")
-        ClickGui(btn)
-        task.wait(0.1)
-        if not GetDropButton() then
-            Log("Dropped.")
-            return "dropped"
-        end
-        btn = GetDropButton() or btn
+    if DropHeld(id) then
+        Log("Dropped.")
+        return "dropped"
     end
-    Fail("Drop not confirmed. Stopped (no spawn walk).")
+    if not GetDropButton() then return "lost" end
+    Fail("Drop not confirmed. Stopped.")
     return nil
 end
 
@@ -627,32 +738,36 @@ local function StealBackAtDrop(id, uid)
     return "returned"
 end
 
--- go back to the egg's own nest and take it again
-local function RecoverEgg(id, origin)
-    SetStatus("Egg went back. Returning for it")
-    Log("Going back to the egg's nest.")
-    if not ApproachTo(origin + Vector3.new(0, 3, 0), id) then return false end
-
-    local prompt = WaitFor(function() return FindPromptNearPos(origin, 4) end, 4, id, 0.05)
-    if not prompt then return false end
-
-    for _ = 1, 6 do
-        FirePrompt(prompt)
-        if WaitFor(GetDropButton, 0.8, id, 0.03) then
-            Log("Took the egg again.")
-            return true
-        end
+-- final leg: tween to SpawnLocation (no walking). "arrived", "lost" (guard hit) or nil
+local function TweenToSpawn(id)
+    local spawn = workspace:FindFirstChild("SpawnLocation")
+    local r = Root()
+    if not spawn or not r then
+        Fail("SpawnLocation not found.")
+        return nil
     end
-    return false
+    local target = spawn.Position + Vector3.new(0, 3, 0)
+    local seconds = DropTweenSeconds((r.Position - target).Magnitude)
+    SetStatus("Tweening to SpawnLocation")
+    Log(string.format("Tween to SpawnLocation in %.2fs", seconds))
+
+    local ok, why = TweenVerified(target, id, seconds, true)
+    if ok then
+        if GetDropButton() then return "arrived" end
+        return "lost"
+    end
+    if why == "lost" then return "lost" end
+    return nil
 end
 
 -- Steal (manual or auto) -> drop area -> Drop -> steal back -> spawn.
--- If the egg is taken back to its nest, it goes back for it (max CFG.MaxRecoveries times).
-local function RunDropWorkflow(id, originHint, uidHint)
+-- If the egg is taken (guard hit / returned to its nest), it goes back for it with the
+-- Forest-egg trick (max CFG.MaxRecoveries times).
+local function RunDropWorkflow(id, originHint, uidHint, lockCamera)
     local started = os.clock()
 
     -- the steal must really be registered BEFORE we move
-    if not WaitFor(GetDropButton, 3, id, 0.03) then
+    if not WaitFor(GetDropButton, 3, id, 0.02) then
         return Fail("Steal not registered (no Drop button). Not moving.")
     end
 
@@ -665,42 +780,45 @@ local function RunDropWorkflow(id, originHint, uidHint)
     end
     local origin = (uid and NestPos[uid]) or originHint
 
+    -- camera stays where you stole it while the character moves
+    if origin and lockCamera ~= false then CamLock(origin) end
+
     local recoveries = 0
     while true do
         local dropped = DropAtArea(id)
         if dropped == nil then return false end
 
-        local outcome = "returned"
         if dropped == "dropped" then
-            outcome = StealBackAtDrop(id, uid)
+            local outcome = StealBackAtDrop(id, uid)
             if outcome == "cancelled" then return false end
+            if outcome == "stolen" then
+                Log("Stole it back.")
+                CamRelease()                       -- secured: camera follows you again
+                local leg = TweenToSpawn(id)
+                if leg == "arrived" then
+                    SetStatus("Done: reached SpawnLocation")
+                    Log("Reached SpawnLocation.")
+                    Notify("Steal", "Cycle complete.", "success", 2)
+                    return true
+                elseif leg == nil then
+                    return false
+                end
+                Log("The guard took the egg on the way to spawn.")
+            end
         end
 
-        if outcome == "stolen" then break end
-
-        -- the monster/guard took the egg back to where it was stolen
+        -- the egg is gone from me: go back for it
         if not origin or recoveries >= CFG.MaxRecoveries then
             return Fail("Egg delivery failed (it keeps returning to its nest).")
         end
         recoveries += 1
         Log("Recovery " .. recoveries .. " of " .. CFG.MaxRecoveries)
-        if not RecoverEgg(id, origin) then
+        CamLock(origin)
+        if not GetEggBack(id, uid, origin) then
             return Fail("Egg delivery failed (could not take the egg back).")
         end
+        CamRelease()
     end
-
-    Log("Stole it back.")
-
-    -- walk to SpawnLocation
-    local arrived = WalkToSpawn(id)
-    if arrived then
-        SetStatus("Done: reached SpawnLocation")
-        Log("Reached SpawnLocation.")
-        Notify("Steal", "Cycle complete.", "success", 2)
-    else
-        SetStatus("Spawn walk interrupted")
-    end
-    return arrived
 end
 
 --==============================================================
@@ -856,8 +974,9 @@ local function EnsureListeners()
             local origin = PromptPosition(prompt)
             local uid0 = origin and UidAtPos(origin)
             task.spawn(function()
-                local ok, err = pcall(RunDropWorkflow, id, origin, uid0)
+                local ok, err = pcall(RunDropWorkflow, id, origin, uid0, true)
                 if not ok then Notify("Steal", "Workflow error: " .. tostring(err), "error", 4) end
+                CamRelease()
                 Busy = false
             end)
         end
@@ -992,6 +1111,17 @@ DescribeEgg = function(rec)
     return string.format("%s | %s | %s", tostring(rec.AssetCategory), tostring(rec.AreaId), rarity or "rarity?")
 end
 
+local function MySpeed()
+    local ls = LocalPlayer:FindFirstChild("leaderstats")
+    local sp = ls and ls:FindFirstChild("Speed")
+    return sp and tonumber(sp.Value) or 0
+end
+
+GuardDanger = function(area)
+    local g = GUARD[area]
+    return g ~= nil and MySpeed() < g.need
+end
+
 local function RarityFilterOn()
     local n = SetSize(SelectedRarities)
     return n > 0 and n < #RARITIES
@@ -1028,6 +1158,10 @@ local function EvaluateEgg(rec)
 
     if BiomeFilterOn() and not SelectedBiomes[Norm(rec.AreaId)] then
         return nil, "biome " .. tostring(rec.AreaId)
+    end
+
+    if SkipDangerous and GuardDanger(tostring(rec.AreaId)) then
+        return nil, "guard too strong"
     end
 
     return {
@@ -1105,13 +1239,15 @@ local function RunScan()
         end
 
         if #samples < 6 then
-            table.insert(samples, string.format("%s | %s | %s | %s | %s",
-                tostring(rec.AssetCategory), tostring(rec.AreaId), st, rarity or "rarity?", egg and "MATCH" or reason))
+            table.insert(samples, string.format("%s | %s | %s | %s | %s | %s",
+                tostring(rec.AssetCategory), tostring(rec.AreaId), st, rarity or "rarity?",
+                GuardDanger(tostring(rec.AreaId)) and "guard chases" or "guard safe", egg and "MATCH" or reason))
         end
     end
 
     local head = string.format("%d tracked, %d match", total, passed)
     Log("---- Scan: " .. head)
+    Log("my speed stat: " .. tostring(MySpeed()))
     Log("states: " .. JoinCounts(states))
     Log("skipped: " .. JoinCounts(reasons))
     for _, line in ipairs(samples) do Log(line) end
@@ -1140,51 +1276,24 @@ local function RunAutoSteal(egg, id)
         return false
     end
 
+    local guard = GUARD[egg.Area]
     SetStatus(string.format("Going to %s egg (%s, %s)", egg.Rarity or "?", egg.Category, egg.Area))
-    Log(string.format("Target: %s | %s | %s", egg.Category, egg.Area, egg.Rarity or "rarity?"))
+    Log(string.format("Target: %s | %s | %s%s", egg.Category, egg.Area, egg.Rarity or "rarity?",
+        guard and (GuardDanger(egg.Area) and " | guard will chase you" or " | guard can't catch you") or ""))
     Notify("Auto Steal", string.format("%s · %s · %s", egg.Rarity or "?", egg.Category, egg.Area), "info", 3)
 
     AttemptedUntil[egg.Uid] = os.clock() + 25
 
     GetOffTreadmill()
 
-    -- 1) approach the egg in short bursts (anti-cheat friendly)
-    if not ApproachTo(egg.Pos + Vector3.new(0, 3, 0), id) then return false end
-
-    -- 2) the prompt that belongs to THIS egg only
-    local prompt = WaitFor(function() return FindPromptNearPos(egg.Pos, 4) end, 3, id, 0.05)
-    if not prompt then return Fail("No Steal prompt at that egg (it may be gone).") end
-
-    local live = Eggs[egg.Uid]
-    if not live or (live.State ~= "Slot" and live.State ~= "Dropped") then
-        return Fail("Someone took that egg first.")
-    end
-
-    -- 3) steal it, and confirm it is THAT egg before going anywhere
-    local stolen = false
-    for _ = 1, 6 do
-        SetStatus("Clicking Steal on the target egg")
-        FirePrompt(prompt)
-
-        local ok = WaitFor(function()
-            local rec = Eggs[egg.Uid]
-            return rec and tonumber(rec.CarrierUserId) == LocalPlayer.UserId
-        end, 0.8, id, 0.03)
-        if ok then stolen = true; break end
-
-        if GetDropButton() then
-            local rec = Eggs[egg.Uid]
-            if not prompt.Parent or not prompt.Enabled or (rec and rec.State ~= "Slot") then
-                stolen = true; break          -- target left its nest and we carry something
-            end
-            return Fail("Picked a different egg than the target. Stopped (drop it manually).")
-        end
-    end
-    if not stolen then return Fail("Steal did not register on the target egg.") end
+    -- camera shows the egg's area; it follows you again once the egg is stolen
+    CamLock(egg.Pos)
+    local ok = GetEggBack(id, egg.Uid, egg.Pos)
+    CamRelease()
+    if not ok then return false end
     Log("Stole the target egg.")
 
-    -- 4) same workflow as Instant Steal: drop area -> stop -> Drop -> steal back -> spawn
-    return RunDropWorkflow(id, egg.Pos, egg.Uid)
+    return RunDropWorkflow(id, egg.Pos, egg.Uid, false)
 end
 
 --==============================================================
@@ -1212,6 +1321,7 @@ local function StartLoop()
                     local id = NewJob()
                     local ok, err = pcall(RunAutoSteal, egg, id)
                     if not ok then Notify("Auto Steal", "Error: " .. tostring(err), "error", 4) end
+                    CamRelease()
                     Busy = false
                     continue
                 end
@@ -1241,6 +1351,7 @@ end
 local function CancelAll(reason)
     Job += 1
     StopTween()
+    CamRelease()
     Busy = false
     SpeedOverride = false
     local h = Hum()
@@ -1316,6 +1427,14 @@ end
 
 Track(RunService.Heartbeat:Connect(function()
     -- everything here is a no-op until you switch the matching toggle on
+    if CamLocked and CamCFrame then
+        local cam = workspace.CurrentCamera
+        if cam then
+            if cam.CameraType ~= Enum.CameraType.Scriptable then cam.CameraType = Enum.CameraType.Scriptable end
+            cam.CFrame = CamCFrame
+        end
+    end
+
     if SpeedAdjust and not SpeedOverride then
         local h = Hum()
         if h and h.WalkSpeed ~= CFG.PlayerSpeed then h.WalkSpeed = CFG.PlayerSpeed end
@@ -1380,6 +1499,7 @@ Track(UserInputService.JumpRequest:Connect(function()
 end))
 
 Track(LocalPlayer.CharacterAdded:Connect(function()
+    CamRelease()
     Worn = false
     Carrying = false
     Busy = false
@@ -1517,6 +1637,7 @@ Window = RageHub:CreateWindow({
     Splash = true,
     OnUnload = function()
         Unloaded = true
+        CamRelease()
         InstantSteal, AutoSteal, AutoTreadmill = false, false, false
         SpeedAdjust, InfiniteJump, Noclip = false, false, false
         SetAntiRagdoll(false)
@@ -1573,7 +1694,7 @@ InstantSection:CreateToggle({
 
 InstantSection:CreateParagraph({
     Title = "Workflow",
-    Content = "Click Steal > (steal must register) > tween to the drop area > stop > click Drop > click the dropped egg's Steal > walk to SpawnLocation. If a step is not confirmed it stops and does not walk.",
+    Content = "Click Steal (camera stays on the egg) > tween to the drop area > stop > Drop > steal it back > tween to SpawnLocation. If the guard takes the egg it goes back with the Forest-egg trick: take a Forest egg, carry it to the target without stopping, drop it, steal the right egg.",
 })
 
 InstantSection:CreateDropdown({
@@ -1670,6 +1791,26 @@ AutoSection:CreateButton({
 
 ScanLog = AutoSection:CreateLog({ Name = "Scan Report", Height = 150, MaxLines = 60 })
 
+local WorkflowSection = StealTab:CreateSection("Workflow")
+
+WorkflowSection:CreateToggle({
+    Name = "Forest Decoy", Flag = "ForestDecoy", Default = true,
+    Description = "Carry a Forest egg to the target, swap it for the target egg",
+    Callback = function(on) UseDecoy = on end,
+})
+
+WorkflowSection:CreateToggle({
+    Name = "Camera Focus", Flag = "CameraFocus", Default = true,
+    Description = "Camera watches the egg area; follows you after the steal",
+    Callback = function(on) CameraFocus = on; if not on then CamRelease() end end,
+})
+
+WorkflowSection:CreateToggle({
+    Name = "Skip Strong Guards", Flag = "SkipStrongGuards", Default = false,
+    Description = "Auto Steal ignores eggs whose guard you can't outrun",
+    Callback = function(on) SkipDangerous = on end,
+})
+
 local MoveSection = StealTab:CreateSection("Movement")
 
 MoveSection:CreateSlider({
@@ -1678,20 +1819,9 @@ MoveSection:CreateSlider({
 })
 
 MoveSection:CreateSlider({
-    Name = "Approach Speed", Flag = "ApproachSpeed", Range = { 100, 1500 }, Increment = 25, Default = CFG.ApproachSpeed,
-    Suffix = " studs/s", Description = "Auto Steal: speed toward the egg",
+    Name = "Approach Speed", Flag = "ApproachSpeed", Range = { 200, 3000 }, Increment = 50, Default = CFG.ApproachSpeed,
+    Suffix = " studs/s", Description = "One fast tween toward an egg (no stopping)",
     Callback = function(v) CFG.ApproachSpeed = v end,
-})
-
-MoveSection:CreateSlider({
-    Name = "Approach Pause", Flag = "ApproachPause", Range = { 0, 1 }, Increment = 0.05, Default = CFG.ApproachPause,
-    Suffix = " s", Description = "Pause between bursts (anti-cheat friendly)",
-    Callback = function(v) CFG.ApproachPause = v end,
-})
-
-MoveSection:CreateSlider({
-    Name = "Spawn Walk Speed", Flag = "SpawnWalkSpeed", Range = { 16, 500 }, Increment = 4, Default = CFG.SpawnWalkSpeed,
-    Callback = function(v) CFG.SpawnWalkSpeed = v end,
 })
 
 MoveSection:CreateSlider({
