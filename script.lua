@@ -1,2314 +1,2586 @@
---// Rage Hub · Steal An Egg · v2 "Flight Edition"
---// Tabs: Steal | Player | Others (+ Rage Hub's built-in Settings tab)
+--//==============================================================
+--//  Rage Hub · Steal An Egg · v1  (Flight Edition rebuild)
+--//==============================================================
+--//  Target: Delta (mobile executor), Rage Hub v1.0.0 UI library.
 --//
---// WHAT'S NEW IN v2 (rebuilt from your Rage Dump - Dex tree + remote spy log):
---//  * FLIGHT instead of tweens: every trip lifts you +50 studs, cruises at 500 studs/s,
---//    then descends and stops exactly on the target. No stop-and-go, no walking.
---//  * DIRECT REMOTES: stealing and dropping now call the game's own remotes
---//    (RF/EggWorld/AskFieldEggCarry / RF/EggWorld/AskFieldEggDrop) exactly like the
---//    game client does - no prompt holding, no Drop GUI clicking. Faster and cleaner.
---//  * DELIVERY: steal -> fly to the FOREST guard's EggPoint -> land -> stop -> Drop ->
---//    re-steal -> fly back to spawn. Crossing into the SafeZone redeems the egg into
---//    your inventory (the server does this by itself - verified in your dump).
---//    "Direct Flight" strategy skips the Forest stop and just flies home (fastest).
---//  * REAL RARITIES: read live from the game's own Data.Assets catalog (17 tiers with
---//    the game's own Rank numbers) - no more guessing from egg names.
---//  * RARE SPAWN ALERTS: listens to the server's own "A Secret ... spawned" broadcasts.
---//  * RECOVERY: if a guard slaps the egg out of you, it chases the egg's live position
---//    (the record updates while the guard walks) and steals it back.
---//  * Guard data read live from each area's GuardEscapeSpeeds attribute.
---//  * Experimental: Auto Place new eggs into your pen + Auto Hatch grown eggs
---//    (both use the game's own remotes, shapes taken from your spy log).
+--//  MOVEMENT : CFrame-stepped glide (the method that already worked
+--//             for you), 500 studs/s cruise, +50 studs offset, climb
+--//             and cruise together, vertical descent only inside the
+--//             last 25 studs, stop 3 studs above the target. Velocity
+--//             is zeroed every frame so nothing fights the humanoid.
 --//
---// CONFIG: Auto Save is ON by default. Your toggles, filters and sliders are saved and
---// restored automatically (this is what makes reconnect + auto execute bring everything
---// back ON). If a saved toggle ever causes trouble at startup: Others > Reset Saved Config.
+--//  HONESTY  : nothing in this file was executed inside Roblox. It
+--//             passes luau-compile + luau-analyze only. Remotes are
+--//             called with the exact shapes the game's own client
+--//             sends (shapes taken from your RageDump). Nothing is
+--//             hooked, blocked, faked or replayed - no firesignal on
+--//             server events, no RigSync / anti-cheat tampering.
 --//
---// Game facts used (verified in RageDump, 2026-10-17):
---//   Steal remote   : RF/EggWorld/AskFieldEggCarry   { Uid, FirstAreaSlotKey? }  -> ok, err
---//   Drop remote    : RF/EggWorld/AskFieldEggDrop    { Reason = "PlayerRequest" } -> ok, err
---//   Egg snapshot   : RF/EggWorld/AskFieldEggSnapshot -> { Records, ServerTime }
---//   Egg events     : RE/EggWorld/FieldEggShifted / FieldEggBatchShifted / FieldEggGone /
---//                    FieldEggCarry { IsCarrying, SpeedMultiplier, Uid, AreaId } /
---//                    FieldEggRedeemVerdict { DisplayName, Rarity, ... } /
---//                    FieldEggRaritiesShown { RareSpawns = { { EggUid, Message, RarityId } } }
---//   Redeem rule    : carry the egg into World.Areas.EggCarryBounds.SafeZone (the spawn
---//                    side of the SeparationLine) -> the carry is cancelled and the egg
---//                    is added to your inventory (OwnerShifted + RedeemVerdict).
---//   Forest EggPoint: workspace.World.Areas.GuardAreas.Forest.Guard.EggPoint (weakest
---//                    guard: needs speed 11, runs 11.6 - it can never catch you).
---//   Spawn          : workspace.SpawnLocation (inside the SafeZone footprint).
---//   Your plot      : workspace.Plots.* - the one whose PlotSign has the "YourBase"
---//                    billboard; treadmill part is TreadmillBottom.
---//   Anti-cheat note: the client "ObbyAntiTP" check is only armed inside monster-event
---//                    regions (workspace.MonsterEventMap / AnticheatSuspendedRegion) -
---//                    normal-world flight is not checked by it. Keep speeds sane anyway.
+--//  SAFETY   : the client ObbyAntiTP check only runs inside armed
+--//             event regions (workspace.MonsterEventMap or the
+--//             AnticheatSuspendedRegion attribute). This script READS
+--//             those regions before every glide and goes over them,
+--//             around them, or refuses the egg. No bypass code.
+--//==============================================================
 
-local RageHub = loadstring(game:HttpGet(
-    "https://raw.githubusercontent.com/devnamegelo/Rage-Hub/main/RageHub.lua"
-))()
+local LibraryOk, RageHub = pcall(function()
+    local chunk = loadstring(game:HttpGet("https://raw.githubusercontent.com/devnamegelo/Rage-Hub/main/RageHub.lua"))
+    if type(chunk) ~= "function" then return nil end
+    return chunk()
+end)
+if not LibraryOk or type(RageHub) ~= "table" then
+    warn("[RageHub] could not load the UI library - aborting.")
+    return
+end
 
 --==============================================================
 -- SERVICES
 --==============================================================
 
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
 local TeleportService = game:GetService("TeleportService")
-local GuiService = game:GetService("GuiService")
-local ProximityPromptService = game:GetService("ProximityPromptService")
+local GuiService       = game:GetService("GuiService")
+local HttpService      = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 
 --==============================================================
--- CONSTANTS
+-- CONSTANTS  (all numbers live here - no sliders in the UI)
 --==============================================================
 
--- The game's real rarity tiers (ReplicatedStorage.Data.Rarity.Configs), with their Rank
--- numbers read from the game. Live values are loaded at startup; this is the fallback.
-local RARITY_LIST = {
-    "Common", "SuperRare", "Uncommon", "Rare", "Epic", "Legendary", "BrainrotGod",
-    "Mythic", "Rainbow", "Cosmic", "Secret", "Eternal", "Limited", "Divine",
-    "Transcendent", "Titan", "LightDark",
+local VERSION            = "v1"
+local AUTO_EXECUTE_URL   = "https://raw.githubusercontent.com/DevNameGelo/rap-rage/refs/heads/main/script.lua"
+local PREFS_PATH         = "RageHub/StealAnEgg/_prefs.json"
+
+local FLIGHT_SPEED       = 500     -- studs/s cruise + climb speed
+local CRUISE_OFFSET      = 50      -- glide this far above max(start, target)
+local GROUND_CLEARANCE   = 60      -- never cruise lower than ground + 60
+local DESCEND_RANGE      = 25      -- horizontal studs where descent begins
+local STOP_ABOVE         = 3       -- stop this far above the target
+local GROUND_WAIT_MAX    = 2.5     -- s to hover waiting for terrain to stream
+local GROUND_RAY_DEPTH   = 90      -- studs of downward raycast at descent
+local JOB_TIMEOUT        = 45      -- s hard timeout per glide
+local PRESTREAM_DISTANCE = 1500    -- studs: target farther than this gets pre-streamed
+local TWOLEG_DISTANCE    = 1500    -- farther than this = glide in two legs
+local TWOLEG_BACKOFF     = 900     -- first leg stops this far before the target
+local REGION_INFLATE     = 35      -- extra margin around armed anti-TP regions
+local REGION_OVER_CLEAR  = 25      -- clearance above a region we fly over
+
+local CARRY_RETRIES      = 3       -- AskFieldEggCarry attempts
+local CARRY_RETRY_GAP    = 0.05    -- s between attempts
+local SATCHEL_PAUSE      = 15      -- s pause when the satchel is full
+local VERDICT_WAIT       = 3       -- s to wait for FieldEggRedeemVerdict
+local JOB_COOLDOWN       = 1.5     -- s between steal jobs
+local MAX_RECOVERIES     = 2       -- recovery attempts per egg
+local BLACKLIST_GROUND   = 30      -- s blacklist when terrain never loads
+local BLACKLIST_FAIL     = 60      -- s blacklist after 2 failed jobs on one uid
+local RAGDOLL_WAIT_MAX   = 4       -- s to wait a ragdoll out during recovery
+local EGG_RECOVER_WAIT   = 8       -- s to wait for a guard to return an egg
+
+local TREADMILL_UNWORN   = 1.5     -- s unworn before re-wearing
+local TREADMILL_GAP      = 3       -- s minimum between wear attempts
+
+local SELL_INTERVAL      = 5       -- s between Auto Sell passes
+local PLACE_INTERVAL     = 2       -- s between Auto Place eggs
+local HATCH_TIME         = 6.2     -- s between AskHatch and AskFinishHatch
+local BESTPET_INTERVAL   = 30      -- s between WearBest checks
+local CLAIM_INTERVAL     = 120     -- s between money claims
+local UPGRADE_INTERVAL   = 10      -- s between treadmill upgrade checks
+local BUYTRAIL_INTERVAL  = 60      -- s between trail purchase checks
+local AFK_INTERVAL       = 45      -- s between virtual input heartbeats
+local REMOTE_FAIL_LIMIT  = 5       -- consecutive transport failures -> auto-disable
+local RECONNECT_MAX      = 8       -- rejoin attempts
+
+-- The only field-egg rarities that exist (fallback if Data.Assets can't be read)
+local FALLBACK_RARITIES = {
+    "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Cosmic", "Secret", "Eternal", "Divine",
 }
 local FALLBACK_RANKS = {
-    Common = 1, Uncommon = 2, SuperRare = 2, Rare = 3, Epic = 4, Legendary = 5,
-    BrainrotGod = 6, Mythic = 6, Rainbow = 6, Cosmic = 7, Secret = 8, Eternal = 9,
-    Limited = 9, Divine = 10, Transcendent = 10, Titan = 11, LightDark = 12,
+    Common = 1, Uncommon = 2, Rare = 3, Epic = 4, Legendary = 5, Mythic = 6,
+    Cosmic = 7, Secret = 8, Eternal = 9, Divine = 10,
 }
-
--- AreaId values seen in FieldEggShifted + the GuardAreas folder in your dump.
-local BIOMES = {
-    "Forest", "Lake", "Desert", "Jungle", "Snow", "Volcano", "Abyss Ocean", "Prehistoric",
-    "Cosmic", "Cherry Blossom", "Titan Temple", "Light Dark", "Enchanted Forest",
+-- Real areas (fallback if GuardAreas can't be walked; Enchanted Forest is WIP and excluded)
+local FALLBACK_BIOMES = {
+    "Forest", "Lake", "Desert", "Jungle", "Snow", "Volcano", "Abyss Ocean",
+    "Prehistoric", "Cosmic", "Cherry Blossom", "Titan Temple", "Light Dark",
 }
-
--- Only used if an area's GuardEscapeSpeeds attribute can't be read.
--- need = speed stat needed, run = guard run speed (studs/s)
-local GUARD = {
-    ["Forest"] = { need = 11, run = 11.6 }, ["Lake"] = { need = 900, run = 24.3 },
-    ["Desert"] = { need = 10000, run = 48.4 }, ["Jungle"] = { need = 40000, run = 65.6 },
-    ["Snow"] = { need = 170000, run = 83.8 }, ["Abyss Ocean"] = { need = 2500000, run = 117.4 },
-    ["Volcano"] = { need = 700000, run = 102.0 }, ["Prehistoric"] = { need = 18000000, run = 143.2 },
-    ["Cosmic"] = { need = 700000000, run = 187.9 }, ["Cherry Blossom"] = { need = 2500000000, run = 205.7 },
-    ["Titan Temple"] = { need = 7000000000, run = 217.8 }, ["Light Dark"] = { need = 20000000000, run = 231.9 },
-    ["Enchanted Forest"] = { need = 49999998976, run = 242.4 },
-}
-
--- Last-resort rarity guess from the egg's name (the Assets catalog handles almost all).
-local NAME_RARITY_FALLBACK = {
-    { "eternal lunar dragon", "Eternal" }, { "el maja", "Eternal" }, { "oni tiger", "Eternal" },
-    { "gorilla king", "Eternal" }, { "pegasus", "Eternal" }, { "skeleton horse", "Eternal" },
-    { "void dragon", "Eternal" }, { "equinox", "Eternal" },
-    { "unicorn", "Divine" }, { "kitsune", "Divine" }, { "nightflame", "Divine" }, { "archangel", "Divine" },
-    { "world burner", "Divine" }, { "aetheron", "Divine" },
-}
-
--- Auto Execute: re-runs this script (from your hosted URL) in the next server
-local AUTO_EXECUTE_URL = "https://raw.githubusercontent.com/DevNameGelo/rap-rage/refs/heads/main/script.lua"
+local SAFEZONE_FALLBACK = { X = 457.0, Z = -364.2, HX = 95.3, HZ = 219.4 }
 
 --==============================================================
--- SETTINGS / STATE  (everything automation-related starts OFF)
+-- PREFS  (read before the window exists so Auto Load = off works)
 --==============================================================
 
-local CFG = {
-    FlySpeed = 500,         -- studs/s cruise speed
-    FlyOffset = 50,         -- studs above the higher endpoint while cruising
-    DescendRadius = 25,     -- start descending when this close (flat) to the target
-    HoverHeight = 3,        -- stop this far above the target point
-    StopDelay = 0.15,       -- stop at the drop area this long before dropping
-    MaxRecoveries = 3,      -- times it goes back for an egg a guard took from you
-    EquipInterval = 30,
-    ClaimInterval = 120,
-    PlayerSpeed = 100,      -- Player tab walk speed (only used when its toggle is on)
-    PlaceInterval = 8,      -- experimental: auto place check interval (s)
-    HatchInterval = 45,     -- experimental: auto hatch check interval (s)
-}
+local Prefs = { AutoSave = true, AutoLoad = true }
+do
+    local okPrefs = pcall(function()
+        if type(isfile) ~= "function" or type(readfile) ~= "function" then return end
+        if not isfile(PREFS_PATH) then return end
+        local decoded = HttpService:JSONDecode(readfile(PREFS_PATH))
+        if type(decoded) == "table" then
+            if decoded.AutoSave == false then Prefs.AutoSave = false end
+            if decoded.AutoLoad == false then Prefs.AutoLoad = false end
+        end
+    end)
+    if not okPrefs then Prefs.AutoSave, Prefs.AutoLoad = true, true end
+end
 
-local InstantSteal = false
-local AutoSteal = false
-local AutoTreadmill = false
-local SpeedAdjust = false
-local InfiniteJump = false
-local Noclip = false
-local AntiRagdoll = false
-local AutoSaveOn = true
-local CameraFocus = true         -- camera watches the egg while stealing it
-local SkipDangerous = false      -- skip eggs whose guard you cannot outrun
-local FlightNoclip = true        -- pass through walls/trees while flying
-local Strategy = "Forest Drop + Re-Steal"
-local EggAlert = false
-local RareSpawnAlert = true
-local AllowUnknownRarity = false
-local AutoEquipBest = false
-local AutoClaimAway = false
-local AutoPlaceEggs = false
-local AutoHatchEggs = false
+local function SavePrefs()
+    pcall(function()
+        if type(makefolder) ~= "function" or type(writefile) ~= "function" then return end
+        makefolder("RageHub")
+        makefolder("RageHub/StealAnEgg")
+        writefile(PREFS_PATH, HttpService:JSONEncode({ AutoSave = Prefs.AutoSave, AutoLoad = Prefs.AutoLoad }))
+    end)
+end
 
-local GetDropButton = function() return nil end
-local CamLocked, CamCFrame = false, nil
-
-local SelectedRarities = {}   -- set; empty or all = any
-local SelectedBiomes = {}     -- set (normalized names); empty or all = any
-local Priority = "Highest Rarity"
-
-local OnEggSeen = function() end
-local ScanLog
-local Log = function() end
-local EggPosition = function() return nil end
-local DescribeEgg = function() return "egg" end
-local GuardDanger = function() return false end
-
-local PauseUntil = 0             -- auto steal cooldown (e.g. satchel full)
-local CarriedUid = nil           -- uid of the egg you carry (from the server)
-local CarriedUidAt = 0
-local NestPos = {}               -- uid -> where that egg's nest is
-local EggSeenAt = {}             -- uid -> when the server last updated that egg
-local LastVerdict = nil          -- last RedeemVerdict payload
-local LastVerdictAt = 0
-local MyEggRecords = {}          -- uid -> your owned egg records (OwnerShifted)
-local SessionStats = { stolen = 0, redeemed = 0, recovered = 0 }
-
-local Unloaded = false
-local Busy = false
-local Flying = false
-local Job = 0                 -- bump to cancel whatever is running
-local Worn = false            -- true while you are on the treadmill
-local Carrying = false        -- true while holding an egg (from FieldEggCarry)
-local LastTriggered = 0       -- os.clock() of your last prompt trigger
-local SpeedOverride = false   -- true while the script is walking you to spawn
-local TreadmillRetryAt = 0
+--==============================================================
+-- FORWARD DECLARATIONS  (window + elements are built at the end)
+--==============================================================
 
 local Window, StatusLabel
-local Connections = {}
-local OriginalHold = setmetatable({}, { __mode = "k" })
-local Eggs = {}               -- Uid -> egg record from the server
-local RarityCache = {}        -- AssetCategory -> { id, rank }
-local AttemptedUntil = {}     -- Uid -> os.clock() until which we skip that egg
+local RarityDropdown, BiomeDropdown
+
+--==============================================================
+-- RUNTIME  (one table for every piece of transient state)
+--==============================================================
+
+local Runtime = {
+    Alive = true, Token = 0, Busy = false, Gliding = false, JobMode = nil,
+    CooldownUntil = 0, PauseUntil = 0, LastStatus = "",
+    Carry = { IsCarrying = false, Uid = nil, Redeemed = false, LostAt = 0 },
+    LastVerdictUid = nil,
+    Eggs = {}, Blacklist = {}, JobFailures = {},
+    RarityByUid = {}, KnownRarities = {},
+    CamFocus = nil, ReplicationPart = nil,
+    Conns = {},
+    Treadmill = { Worn = false, UnwornAt = 0, LastWear = 0, TierId = nil },
+    MyPlotSlot = nil,
+    Profile = { Money = nil, EggInventory = {}, Inventory = {}, EquippedAssets = nil },
+    HatchQueue = {}, HatchStarted = {}, HatchRetryAt = {},
+    TrailAttempted = {}, TrailFalseCount = {},
+    Butterfly = { Fails = 0, LastSwing = 0, NetReach = 25, Cooldown = 1.5, Connected = false },
+    MotorBase = {}, KnownPhysics = {}, SavedCollide = {}, AntiRagdollOn = false,
+    AutoExecuteQueued = false, Rejoining = false, ReconnectRetries = 0,
+    LastTeleport = nil, HopBusy = false,
+    RemoteFails = {},
+    PlaceFalseStreak = 0, PlacePauseUntil = 0, LastOthersApply = 0,
+    HatchFinFails = {}, LastHatchStart = 0, LastPetSig = "",
+}
+
+local function SetStatus(text)
+    if Runtime.LastStatus == text then return end
+    Runtime.LastStatus = text
+    if StatusLabel then pcall(function() StatusLabel:Set(text) end) end
+end
+
+local function Notify(title, content, kind, duration)
+    if not Window then return end
+    pcall(function()
+        Window:Notify({ Title = title, Content = content, Type = kind or "info", Duration = duration or 4 })
+    end)
+end
+
+local function NewToken()
+    Runtime.Token += 1
+    return Runtime.Token
+end
+
+local function TokenAlive(token)
+    return Runtime.Alive and Runtime.Token == token
+end
+
+local function BlacklistUid(uid, seconds)
+    Runtime.Blacklist[uid] = os.clock() + seconds
+end
+
+local function Blacklisted(uid)
+    local until_ = Runtime.Blacklist[uid]
+    if until_ and os.clock() < until_ then return true end
+    Runtime.Blacklist[uid] = nil
+    return false
+end
+
+--==============================================================
+-- REMOTE LAYER  (cache + pcall + per-feature failure counter)
+--==============================================================
+
+local NetRoot do
+    local packages = ReplicatedStorage:WaitForChild("Packages", 20)
+    NetRoot = packages and packages:WaitForChild("Networking", 20) or nil
+end
+
+local RemoteCache = {}
+local function Net(kind, path)
+    local key = kind .. "/" .. path
+    local cached = RemoteCache[key]
+    if cached ~= nil then return cached end
+    local node = NetRoot
+    if node then
+        for segment in path:gmatch("[^/]+") do
+            node = node:WaitForChild(segment, 8)
+            if not node then break end
+        end
+    end
+    if node and not node:IsA("RemoteFunction") and not node:IsA("RemoteEvent") then node = nil end
+    RemoteCache[key] = node
+    return node
+end
+
+local function InvokeRemote(node, ...)
+    if not node then return false, "no-remote" end
+    local packed = table.pack(...)
+    local ok, a, b, c = pcall(function()
+        return node:InvokeServer(table.unpack(packed, 1, packed.n))
+    end)
+    if ok then return true, a, b, c end
+    return false, tostring(a)
+end
+
+local function FireRemote(node, ...)
+    if not node then return false, "no-remote" end
+    local packed = table.pack(...)
+    local ok, err = pcall(function()
+        node:FireServer(table.unpack(packed, 1, packed.n))
+    end)
+    return ok, err
+end
+
+-- Calls InvokeRemote but counts consecutive transport failures per feature
+-- flag; after REMOTE_FAIL_LIMIT it switches that toggle off and tells you once.
+local function FeatureInvoke(flagName, node, ...)
+    local ok, a, b, c = InvokeRemote(node, ...)
+    if ok then
+        Runtime.RemoteFails[flagName] = 0
+        return true, a, b, c
+    end
+    Runtime.RemoteFails[flagName] = (Runtime.RemoteFails[flagName] or 0) + 1
+    if Runtime.RemoteFails[flagName] >= REMOTE_FAIL_LIMIT and Window then
+        local element = Window:GetElement(flagName)
+        if element and element.Set and element.Get and element:Get() == true then
+            Notify(flagName, "Disabled after " .. tostring(Runtime.RemoteFails[flagName]) .. " remote failures in a row.", "warning", 5)
+            pcall(function() element:Set(false) end)
+        end
+    end
+    return false, a
+end
 
 local function Track(conn)
-    if conn then table.insert(Connections, conn) end
+    Runtime.Conns[#Runtime.Conns + 1] = conn
     return conn
 end
 
 --==============================================================
--- UI HELPERS
+-- FLAG READERS  (Rage Hub keeps Window.Flags live: creation,
+-- user input and config load all go through Commit)
 --==============================================================
 
-local function Notify(title, content, kind, duration)
-    pcall(function()
-        if Window then
-            Window:Notify({ Title = title, Content = content, Type = kind or "info", Duration = duration or 3 })
+local function FlagOn(name)
+    if not Window then return false end
+    return Window.Flags[name] == true
+end
+
+local function FlagSet(name)
+    local list = Window and Window.Flags[name]
+    local set = {}
+    if type(list) == "table" then
+        for _, item in ipairs(list) do set[tostring(item)] = true end
+    elseif type(list) == "string" then
+        set[list] = true
+    end
+    return set
+end
+
+local function CancelJobs()
+    NewToken()
+    Runtime.Busy = false
+    Runtime.Gliding = false
+end
+
+--==============================================================
+-- SUPERVISORS  (a loop that can never die: pcall + heartbeat +
+-- watchdog restart; character respawn does NOT restart them)
+--==============================================================
+
+local Supervisors = {}
+local function Supervisor(name, interval, fn)
+    local entry = { Name = name, Interval = interval, Fn = fn, HB = os.clock(), Gen = 0 }
+    Supervisors[name] = entry
+    local function run()
+        local gen = entry.Gen
+        while Runtime.Alive and entry.Gen == gen do
+            entry.HB = os.clock()
+            local ok, err = pcall(fn)
+            if not ok then warn("[RageHub:" .. name .. "] " .. tostring(err)) end
+            task.wait(interval)
         end
+    end
+    function entry.Restart()
+        entry.Gen += 1
+        task.spawn(run)
+    end
+    entry.Restart()
+    return entry
+end
+
+--==============================================================
+-- CHARACTER HELPERS  (re-fetched every use: cached rigs are stale
+-- after RigSync/AskRigWipe respawns)
+--==============================================================
+
+local function Char()
+    local char = LocalPlayer.Character
+    if not char or not char.Parent then return nil end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not root or hum.Health <= 0 then return nil end
+    return char, hum, root
+end
+
+local function IsRagdolled()
+    local ragEnd = LocalPlayer:GetAttribute("RagdollEndTime")
+    local char = LocalPlayer.Character
+    if not ragEnd and char then ragEnd = char:GetAttribute("RagdollEndTime") end
+    if ragEnd and workspace:GetServerTimeNow() < ragEnd then return true end
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        local state = hum:GetState()
+        if state == Enum.HumanoidStateType.Ragdoll or state == Enum.HumanoidStateType.FallingDown then
+            return true
+        end
+    end
+    return false
+end
+
+local function Cam()
+    return workspace.CurrentCamera
+end
+
+local RayParams = RaycastParams.new()
+RayParams.FilterType = Enum.RaycastFilterType.Exclude
+local function RayDown(fromPos, range)
+    local char = LocalPlayer.Character
+    RayParams.FilterDescendantsInstances = char and { char } or {}
+    return workspace:Raycast(fromPos, Vector3.new(0, -range, 0), RayParams)
+end
+
+local function FindPartNear(pos, radius)
+    local params = OverlapParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local char = LocalPlayer.Character
+    params.FilterDescendantsInstances = char and { char } or {}
+    local parts = workspace:GetPartBoundsInRadius(pos, radius, params)
+    return parts[1]
+end
+
+--==============================================================
+-- ARMED ANTI-TP REGIONS  (read-only: avoid, never bypass)
+--==============================================================
+
+local function ArmedRegion()
+    if workspace:GetAttribute("ClientObbyAntiTp") == false then return nil end
+    local box = workspace:FindFirstChild("MonsterEventMap")
+    if box and box:IsA("Model") then
+        local okCF, cf, size = pcall(function() return box:GetBoundingBox() end)
+        if okCF and typeof(cf) == "CFrame" and typeof(size) == "Vector3" then
+            return { Min = cf.Position - size / 2, Max = cf.Position + size / 2 }
+        end
+        return nil
+    end
+    local attr = workspace:GetAttribute("AnticheatSuspendedRegion")
+    if type(attr) == "string" then
+        local nums = {}
+        for token in attr:gmatch("[^,]+") do
+            local value = tonumber(token)
+            if value then nums[#nums + 1] = value end
+        end
+        if #nums >= 6 then
+            local minV = Vector3.new(nums[1], nums[2], nums[3])
+            local maxV = Vector3.new(nums[4], nums[5], nums[6])
+            if maxV.X >= minV.X and maxV.Y >= minV.Y and maxV.Z >= minV.Z then
+                return { Min = minV, Max = maxV }
+            end
+        end
+    end
+    return nil
+end
+
+local function PosInBox(pos, minV, maxV)
+    return pos.X >= minV.X and pos.X <= maxV.X
+       and pos.Y >= minV.Y and pos.Y <= maxV.Y
+       and pos.Z >= minV.Z and pos.Z <= maxV.Z
+end
+
+-- Liang-Barsky clip of the XZ projection of a segment against a rectangle.
+local function SegmentHitsRectXZ(a, b, minV, maxV)
+    local t0, t1 = 0, 1
+    local dx, dz = b.X - a.X, b.Z - a.Z
+    local edges = {
+        { -dx, a.X - minV.X }, { dx, maxV.X - a.X },
+        { -dz, a.Z - minV.Z }, { dz, maxV.Z - a.Z },
+    }
+    for i = 1, 4 do
+        local p, q = edges[i][1], edges[i][2]
+        if p == 0 then
+            if q < 0 then return false end
+        else
+            local r = q / p
+            if p < 0 then
+                if r > t1 then return false end
+                if r > t0 then t0 = r end
+            else
+                if r < t0 then return false end
+                if r < t1 then t1 = r end
+            end
+        end
+    end
+    return true
+end
+
+--==============================================================
+-- CAMERA + STREAMING  (the game's own cutscene pattern: camera on
+-- the target, ReplicationFocus on a real part near it)
+--==============================================================
+
+local function SetReplicationTarget(part)
+    if Runtime.ReplicationPart == part then return end
+    Runtime.ReplicationPart = part
+    pcall(function() LocalPlayer.ReplicationFocus = part end)
+end
+
+local function ReleaseCamera()
+    Runtime.CamFocus = nil
+    SetReplicationTarget(nil)
+    pcall(function()
+        local camera = Cam()
+        if camera and camera.CameraType == Enum.CameraType.Scriptable then
+            camera.CameraType = Enum.CameraType.Custom
+        end
+        local _, humNow = Char()
+        if humNow and camera then camera.CameraSubject = humNow end
     end)
 end
 
-local function SetStatus(text)
-    if StatusLabel then
-        pcall(function() StatusLabel:Set("Status: " .. tostring(text)) end)
+local function FocusOn(pos)
+    Runtime.CamFocus = { Pos = pos }
+end
+
+-- one permanent draw loop: while a focus is set, the camera sits behind
+-- the character and looks at the focus point (egg visible, you visible)
+Track(RunService.RenderStepped:Connect(function()
+    local okDraw, errDraw = pcall(function()
+        local focus = Runtime.CamFocus
+        if not focus then return end
+        local _, _, rootNow = Char()
+        if not rootNow then return end
+        local camera = Cam()
+        if not camera then return end
+        local targetPos = focus.Pos
+        local myPos = rootNow.Position
+        local backX, backZ = myPos.X - targetPos.X, myPos.Z - targetPos.Z
+        local backMag = math.sqrt(backX * backX + backZ * backZ)
+        local dirX, dirZ = 0, 1
+        if backMag > 2 then
+            dirX, dirZ = backX / backMag, backZ / backMag
+        end
+        local camPos = Vector3.new(myPos.X + dirX * 16, myPos.Y + 10, myPos.Z + dirZ * 16)
+        if camera.CameraType ~= Enum.CameraType.Scriptable then
+            camera.CameraType = Enum.CameraType.Scriptable
+        end
+        camera.CFrame = CFrame.lookAt(camPos, targetPos)
+    end)
+    if not okDraw then warn("[RageHub:Cam] " .. tostring(errDraw)) end
+end))
+
+local function PreStream(targetPos)
+    if not workspace.StreamingEnabled then return end
+    local _, _, rootNow = Char()
+    if not rootNow then return end
+    if (rootNow.Position - targetPos).Magnitude <= PRESTREAM_DISTANCE then return end
+    pcall(function() LocalPlayer:RequestStreamAroundAsync(targetPos, 2) end)
+    local deadline = os.clock() + 2.5
+    local found = nil
+    while os.clock() < deadline and Runtime.Alive do
+        found = FindPartNear(targetPos, 40)
+        if found then break end
+        task.wait(0.15)
     end
+    if found then SetReplicationTarget(found) end
 end
 
 --==============================================================
--- CHARACTER HELPERS
+-- RESET  (death / respawn: clear transient state, keep knowledge)
 --==============================================================
 
-local function Char() return LocalPlayer.Character end
-local function Root()
-    local c = Char()
-    return c and c:FindFirstChild("HumanoidRootPart")
-end
-local function Hum()
-    local c = Char()
-    return c and c:FindFirstChildOfClass("Humanoid")
-end
-
-local function Lower(s) return string.lower(tostring(s or "")) end
-
-local function Cancelled(id)
-    return Unloaded or id ~= Job
-end
-
-local function NewJob()
-    Job += 1
-    return Job
-end
-
-local function Net(name)
-    local pk = ReplicatedStorage:FindFirstChild("Packages")
-    local nw = pk and pk:FindFirstChild("Networking")
-    return nw and nw:FindFirstChild(name)
-end
-
-local function WaitFor(fn, timeout, id, interval)
-    local t0 = os.clock()
-    repeat
-        if Cancelled(id) then return nil end
-        local v = fn()
-        if v then return v end
-        task.wait(interval or 0.1)
-    until os.clock() - t0 >= timeout
-    return nil
+local function ResetRuntime()
+    NewToken()
+    Runtime.Busy = false
+    Runtime.Gliding = false
+    Runtime.JobMode = nil
+    Runtime.Carry = { IsCarrying = false, Uid = nil, Redeemed = false, LostAt = 0 }
+    Runtime.Treadmill.Worn = false
+    Runtime.Treadmill.UnwornAt = os.clock()
+    ReleaseCamera()
 end
 
 --==============================================================
--- CARRYING (GUI indicator + server state)
+-- GLIDE  (one continuous CFrame-stepped flight per leg)
+--   climb+cruise at 500 studs/s toward the point above the target,
+--   descend only inside the last 25 studs, stop 3 studs above it.
+--   Returns: true  |  false, reason  (cancelled / dead / ragdoll /
+--   region / ground / timeout / busy / error)
 --==============================================================
 
-local function GuiVisible(obj)
-    local cur = obj
-    while cur and cur ~= game do
-        if cur:IsA("GuiObject") and not cur.Visible then return false end
-        if cur:IsA("ScreenGui") and not cur.Enabled then return false end
-        cur = cur.Parent
-    end
-    return obj and obj.AbsoluteSize.X > 0
-end
-
-GetDropButton = function()
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    local gui = pg and pg:FindFirstChild("DropHeldEgg")
-    local btn = gui and gui:FindFirstChild("Button")
-    if btn and GuiVisible(btn) then return btn end
-    return nil
-end
-
--- are we holding an egg right now? (the game shows the Drop button while carrying)
-local function IsCarryingNow()
-    if GetDropButton() then return true end
-    return Carrying == true
-end
-
-local function WaitForCarry(timeout, id)
-    return WaitFor(IsCarryingNow, timeout, id, 0.03) ~= nil
-end
-
---==============================================================
--- FLIGHT CONTROLLER  (velocity-based, no tweens)
---   Lift to cruise height (offset above the higher endpoint), cruise at FlySpeed,
---   descend near the target, stop dead on it. Works at any speed; the character's
---   collisions can be disabled while flying (Flight Noclip) so trees never stop you.
---==============================================================
-
-local function EndFlight()
-    Flying = false
-    local r = Root()
-    if r then
-        pcall(function()
-            r.AssemblyLinearVelocity = Vector3.zero
-            r.AssemblyAngularVelocity = Vector3.zero
-        end)
-    end
-end
-
--- Fly to pos. opts: { Speed, Offset, DescendRadius, HoverY, MustCarry }
--- returns: true | false, "cancelled" | "lost" | "timeout" | "noreply"
-local function FlyTo(pos, id, opts)
+local function Glide(targetPos, token, opts)
     opts = opts or {}
-    local r = Root()
-    if not r then return false, "noreply" end
-    if typeof(pos) ~= "Vector3" then return false, "noreply" end
+    local checkFn = opts.Check
+    local timeout = opts.Timeout or JOB_TIMEOUT
+    if Runtime.Gliding then return false, "busy" end
 
-    pos = Vector3.new(pos.X, pos.Y, pos.Z)
-    local speed = math.max(60, opts.Speed or CFG.FlySpeed)
-    local offset = math.max(5, opts.Offset or CFG.FlyOffset)
-    local descendR = math.max(6, opts.DescendRadius or CFG.DescendRadius)
-    local hoverY = opts.HoverY ~= nil and opts.HoverY or CFG.HoverHeight
-    local mustCarry = opts.MustCarry == true
-    local vSpeed = math.min(speed, 320)   -- climb cap
-    local dSpeed = math.min(speed, 300)   -- descend cap
-    local cruiseY = math.max(r.Position.Y, pos.Y) + offset
-    local timeout = os.clock() + math.max(6, ((r.Position - pos).Magnitude / speed) * 2.5 + 6)
+    local _, _, root = Char()
+    if not root then return false, "dead" end
+    if IsRagdolled() then return false, "ragdoll" end
 
-    Flying = true
-    local ok, why = false, nil
+    local startPos = root.Position
 
-    while true do
-        if Cancelled(id) then why = "cancelled"; break end
-        if os.clock() > timeout then why = "timeout"; break end
+    -- armed anti-TP regions: never glide through, never start/end inside
+    local region = ArmedRegion()
+    local overY = nil
+    if region then
+        if PosInBox(startPos, region.Min, region.Max) then return false, "region" end
+        if PosInBox(targetPos, region.Min, region.Max) then return false, "region" end
+        local infMin = region.Min - Vector3.new(REGION_INFLATE, REGION_INFLATE, REGION_INFLATE)
+        local infMax = region.Max + Vector3.new(REGION_INFLATE, REGION_INFLATE, REGION_INFLATE)
+        if SegmentHitsRectXZ(startPos, targetPos, infMin, infMax) then
+            overY = region.Max.Y + REGION_OVER_CLEAR
+        end
+    end
 
-        r = Root()
-        if not r then why = "noreply"; break end
+    local cruiseY = math.max(startPos.Y, targetPos.Y) + CRUISE_OFFSET
+    if overY then cruiseY = math.max(cruiseY, overY + 15) end
 
-        local p = r.Position
-        local flat = Vector3.new(pos.X - p.X, 0, pos.Z - p.Z)
-        local flatDist = flat.Magnitude
-        local goalY = (flatDist > descendR) and cruiseY or (pos.Y + hoverY)
-        local dy = goalY - p.Y
+    Runtime.Gliding = true
+    local done, reason = false, nil
+    local startedAt = os.clock()
+    local groundHold, streamedRetry = 0, false
+    local traveled, nextSample = 0, 0
+    local climbing = overY ~= nil
 
-        if flatDist <= 1.25 and math.abs(dy) <= 1.25 then
-            r.AssemblyLinearVelocity = Vector3.zero
-            r.AssemblyAngularVelocity = Vector3.zero
-            ok = true
-            break
-        elseif flatDist > descendR then
-            local horiz = flatDist > 0.05 and (flat / flatDist) * speed or Vector3.zero
-            local vert = math.clamp(dy, -dSpeed, vSpeed)
-            r.AssemblyLinearVelocity = Vector3.new(horiz.X, vert, horiz.Z)
-        else
-            -- final approach: slow down proportionally so we stop dead on the point
-            local to = Vector3.new(pos.X, pos.Y + hoverY, pos.Z) - p
-            local dist3 = to.Magnitude
-            if dist3 > 0.05 then
-                local eff = math.min(dSpeed, math.max(30, dist3 * 6))
-                r.AssemblyLinearVelocity = to.Unit * eff
+    local function step(dt)
+        if done then return end
+        if not TokenAlive(token) then reason = "cancelled"; done = true; return end
+        local char2, _, root2 = Char()
+        if not char2 then reason = "dead"; done = true; return end
+        if IsRagdolled() then reason = "ragdoll"; done = true; return end
+        if os.clock() - startedAt > timeout then reason = "timeout"; done = true; return end
+        if checkFn then
+            local abort, why = checkFn(root2.Position)
+            if abort then reason = why or "cancelled"; done = true; return end
+        end
+
+        root2.AssemblyLinearVelocity = Vector3.zero
+        root2.AssemblyAngularVelocity = Vector3.zero
+
+        local pos = root2.Position
+        local flatDist = math.sqrt((pos.X - targetPos.X) ^ 2 + (pos.Z - targetPos.Z) ^ 2)
+
+        -- sample the ground every 150 studs and keep 60 studs of clearance
+        if traveled >= nextSample then
+            nextSample = traveled + 150
+            local hit = RayDown(Vector3.new(pos.X, pos.Y + 5, pos.Z), 260)
+            if hit then
+                local floorY = hit.Position.Y + GROUND_CLEARANCE
+                if floorY > cruiseY then cruiseY = floorY end
+            end
+        end
+
+        local aim = nil
+        if climbing then
+            if math.abs(pos.Y - cruiseY) < 2 then
+                climbing = false
             else
-                r.AssemblyLinearVelocity = Vector3.zero
+                aim = Vector3.new(pos.X, cruiseY, pos.Z)
             end
         end
-        pcall(function() r.AssemblyAngularVelocity = Vector3.zero end)
-
-        if mustCarry and not IsCarryingNow() then
-            why = "lost"
-            break
-        end
-
-        RunService.Heartbeat:Wait()
-    end
-
-    local fr = Root()
-    if fr then
-        pcall(function()
-            fr.AssemblyLinearVelocity = Vector3.zero
-            fr.AssemblyAngularVelocity = Vector3.zero
-        end)
-    end
-    return ok, why
-end
-
---==============================================================
--- CAMERA (stays on the egg while you steal it, follows you again after)
---==============================================================
-
-local function CamLock(pos)
-    if not CameraFocus or not pos then return end
-    local cam = workspace.CurrentCamera
-    if not cam then return end
-    CamCFrame = CFrame.lookAt(pos + Vector3.new(0, 16, 24), pos)
-    CamLocked = true
-    cam.CameraType = Enum.CameraType.Scriptable
-    cam.CFrame = CamCFrame
-end
-
-local function CamRelease()
-    if not CamLocked then return end
-    CamLocked, CamCFrame = false, nil
-    local cam = workspace.CurrentCamera
-    if cam then
-        local h = Hum()
-        if h then cam.CameraSubject = h end
-        cam.CameraType = Enum.CameraType.Custom
-    end
-end
-
---==============================================================
--- PROMPTS (Instant Steal convenience: 0.1s hold on Steal prompts)
---==============================================================
-
-local function IsStealPrompt(p)
-    if not p or not p:IsA("ProximityPrompt") then return false end
-    return string.find(Lower(p.ActionText), "steal", 1, true) ~= nil
-        or string.find(Lower(p.Name), "carryareaegg", 1, true) ~= nil
-end
-
-local function PromptPosition(p)
-    local parent = p.Parent
-    if parent and parent:IsA("BasePart") then return parent.Position end
-    if parent and parent:IsA("Attachment") then return parent.WorldPosition end
-    return nil
-end
-
-local function ApplyFast(p)
-    if not InstantSteal or not IsStealPrompt(p) then return end
-    if OriginalHold[p] == nil then OriginalHold[p] = p.HoldDuration end
-    if p.HoldDuration ~= 0.1 then p.HoldDuration = 0.1 end
-end
-
-local function ApplyFastToAll()
-    for _, holder in ipairs(workspace:GetChildren()) do
-        if holder.Name == "SmartPromptPart" then
-            for _, p in ipairs(holder:GetChildren()) do
-                if p:IsA("ProximityPrompt") then ApplyFast(p) end
+        if not aim then
+            if flatDist > DESCEND_RANGE then
+                aim = Vector3.new(targetPos.X, cruiseY, targetPos.Z)
+            else
+                aim = Vector3.new(targetPos.X, targetPos.Y + STOP_ABOVE, targetPos.Z)
             end
         end
-    end
-end
 
-local function RestoreHolds()
-    for p, old in pairs(OriginalHold) do
-        if p and p.Parent then pcall(function() p.HoldDuration = old end) end
-        OriginalHold[p] = nil
+        local delta = aim - pos
+        local dist = delta.Magnitude
+        if dist <= 0.75 then
+            if not climbing then done = true end
+            return
+        end
+
+        -- descent gate: only descend where a raycast finds ground
+        if not climbing and flatDist <= DESCEND_RANGE and pos.Y > targetPos.Y + STOP_ABOVE + 2 then
+            local ground = RayDown(pos, GROUND_RAY_DEPTH + math.max(pos.Y - targetPos.Y, 0))
+            if not ground then
+                groundHold += dt
+                if not streamedRetry then
+                    streamedRetry = true
+                    pcall(function() LocalPlayer:RequestStreamAroundAsync(targetPos, 2) end)
+                end
+                if groundHold > GROUND_WAIT_MAX then
+                    reason = "ground"
+                    done = true
+                end
+                return
+            else
+                groundHold = 0
+            end
+        end
+
+        local stepDist = math.min(FLIGHT_SPEED * dt, dist)
+        local newPos = pos + (delta / dist) * stepDist
+        traveled += stepDist
+        root2.CFrame = CFrame.new(newPos) * root2.CFrame.Rotation
     end
+
+    local conn = RunService.Heartbeat:Connect(function(dt)
+        local okStep, errStep = pcall(step, dt)
+        if not okStep then
+            reason = "error"
+            done = true
+            warn("[RageHub:Glide] " .. tostring(errStep))
+        end
+    end)
+
+    while not done and Runtime.Alive do
+        if os.clock() - startedAt > timeout + 3 then
+            reason = reason or "timeout"
+            done = true
+        end
+        task.wait(0.05)
+    end
+    pcall(function() conn:Disconnect() end)
+    Runtime.Gliding = false
+
+    if reason then return false, reason end
+    if not Runtime.Alive then return false, "cancelled" end
+    return true
 end
 
 --==============================================================
--- DIRECT REMOTES (the game's own steal / drop calls - from your spy log)
+-- EGG DATA  (snapshot + live events; carry state comes ONLY from
+-- the server, never from the Drop GUI)
 --==============================================================
 
--- FirstArea eggs (your own base nests) need the slot key, world eggs just the Uid.
-local function CarryArgs(rec)
-    if type(rec.Uid) == "string" and string.find(rec.Uid, "FirstAreaEgg_", 1, true) == 1 then
-        return { Uid = rec.Uid, FirstAreaSlotKey = tostring(rec.AreaId) .. ":" .. tostring(rec.NestId) }
-    end
-    return { Uid = rec.Uid }
-end
+local AssetsDir, RarityDir
+pcall(function()
+    local dataFolder = ReplicatedStorage:WaitForChild("Data", 10)
+    local assetsModule = dataFolder and dataFolder:WaitForChild("Assets", 5)
+    local rarityModule = dataFolder and dataFolder:WaitForChild("Rarity", 5)
+    if assetsModule then AssetsDir = require(assetsModule).Directory end
+    if rarityModule then RarityDir = require(rarityModule).Rarities end
+end)
 
--- returns ok, err (never throws)
-local function CarryEggRemote(rec)
-    local rf = Net("RF/EggWorld/AskFieldEggCarry")
-    if not rf or not rf:IsA("RemoteFunction") then
-        return false, "AskFieldEggCarry not found"
-    end
-    local ok, a, b = pcall(function() return rf:InvokeServer(CarryArgs(rec)) end)
-    if not ok then return false, tostring(a) end
-    if a ~= true then
-        if type(b) ~= "string" then b = "denied" end
-        return false, b
-    end
-    return true, nil
-end
-
-local function DropEggRemote()
-    local rf = Net("RF/EggWorld/AskFieldEggDrop")
-    if not rf or not rf:IsA("RemoteFunction") then
-        return false, "AskFieldEggDrop not found"
-    end
-    local ok, a, b = pcall(function() return rf:InvokeServer({ Reason = "PlayerRequest" }) end)
-    if not ok then return false, tostring(a) end
-    if a ~= true then
-        if type(b) ~= "string" then b = "denied" end
-        return false, b
-    end
-    return true, nil
-end
-
---==============================================================
--- WORLD POINTS
---==============================================================
-
-local function PositionOfObj(obj)
-    if not obj then return nil end
-    if obj:IsA("BasePart") then return obj.Position end
-    if obj:IsA("Attachment") then return obj.WorldPosition end
-    if obj:IsA("Model") then
-        local ok, cf = pcall(function() return obj:GetPivot() end)
-        if ok then return cf.Position end
+local CategoryRarity = {}
+local function RarityOf(category)
+    if type(category) ~= "string" then return nil end
+    local known = CategoryRarity[category]
+    if known ~= nil then return known end
+    if type(AssetsDir) == "table" then
+        local asset = AssetsDir[category]
+        if type(asset) == "table" and type(asset.Rarity) == "table" and type(asset.Rarity._id) == "string" then
+            CategoryRarity[category] = asset.Rarity._id
+            return asset.Rarity._id
+        end
     end
     return nil
 end
 
-local function GetGuardAreas()
-    local ok, folder = pcall(function() return workspace.World.Areas.GuardAreas end)
-    return ok and folder or nil
+local function RankOf(rarity)
+    if type(rarity) ~= "string" then return 0 end
+    if type(RarityDir) == "table" then
+        local info = RarityDir[rarity]
+        if type(info) == "table" and type(info.Rank) == "number" then return info.Rank end
+    end
+    return FALLBACK_RANKS[rarity] or 0
 end
 
-local function AreaDropPoint(areas, name)
-    if not areas then return nil end
-    local area = areas:FindFirstChild(name)
-    if not area then return nil end
-    local guard = area:FindFirstChild("Guard")
-    local point = guard and (guard:FindFirstChild("EggPoint") or guard:FindFirstChild("HumanoidRootPart"))
-    if point then return point, area end
-    local sign = area:FindFirstChild("RequiredSpeedSign")
-    local support = sign and (sign:FindFirstChild("Support") or sign:FindFirstChild("Main"))
-    if support then return support, area end
-    return nil, area
+local function ForEachRecord(container, fn)
+    if type(container) ~= "table" then return end
+    for _, rec in container do
+        if type(rec) == "table" then fn(rec) end
+    end
 end
 
--- The Forest guard's EggPoint: the weakest guard in the game, and the closest drop
--- spot to the SafeZone. Falls back to the sign, then to Lake, then to any area.
-local function DropPointPos()
-    local areas = GetGuardAreas()
-    if not areas then return nil, nil end
+local function ApplyRecord(rec)
+    if type(rec) ~= "table" then return end
+    local uid = rec.Uid
+    if type(uid) ~= "string" then return end
+    if rec.State == "Claimed" or rec.State == "Gone" then
+        Runtime.Eggs[uid] = nil
+    else
+        Runtime.Eggs[uid] = rec
+    end
+end
 
-    if Strategy == "Nearest Area Drop" then
-        local r = Root()
-        local best, bestDist, bestName
-        for _, area in ipairs(areas:GetChildren()) do
-            local point = AreaDropPoint(areas, area.Name)
-            local pos = point and PositionOfObj(point)
-            if pos and r then
-                local d = (pos - r.Position).Magnitude
-                if not bestDist or d < bestDist then best, bestDist, bestName = pos, d, area.Name end
+local function RecordPos(rec)
+    local cf = rec.BottomCFrame
+    if typeof(cf) ~= "CFrame" then cf = rec.BoundsCFrame end
+    if typeof(cf) == "CFrame" then return cf.Position end
+    return nil
+end
+
+local function RefreshSnapshot()
+    local ok, result = InvokeRemote(Net("RF", "EggWorld/AskFieldEggSnapshot"))
+    if ok and type(result) == "table" and type(result.Records) == "table" then
+        Runtime.Eggs = {}
+        ForEachRecord(result.Records, ApplyRecord)
+        return true
+    end
+    return false
+end
+
+local function BuildRarityOptions()
+    local seen, list = {}, {}
+    if type(AssetsDir) == "table" then
+        for _, asset in AssetsDir do
+            if type(asset) == "table" and type(asset.Rarity) == "table" then
+                local rid = asset.Rarity._id
+                if type(rid) == "string" and (tonumber(asset.DropWeight) or 0) > 0 and not seen[rid] then
+                    seen[rid] = true
+                    list[#list + 1] = rid
+                end
             end
         end
-        return best, bestName
     end
-
-    local primary = (Strategy == "Direct Flight Home") and nil or "Forest"
-    if primary then
-        local point = AreaDropPoint(areas, primary)
-        local pos = point and PositionOfObj(point)
-        if pos then return pos, primary end
-        Log("Forest EggPoint not found; trying Lake.")
-        point = AreaDropPoint(areas, "Lake")
-        pos = point and PositionOfObj(point)
-        if pos then return pos, "Lake" end
-    end
-    return nil, nil
-end
-
--- Where "home" is: spawn (inside the SafeZone footprint - carrying the egg here
--- redeems it). Your plot's SpawnPoint is the deeper fallback.
-local function HomePoint()
-    local spawn = workspace:FindFirstChild("SpawnLocation")
-    if spawn and spawn:IsA("BasePart") then
-        return spawn.Position + Vector3.new(0, 3, 0)
-    end
-    local r = Root()
-    if r then return r.Position end
-    return Vector3.new(512, 71, -362)
-end
-
-local function PlotSpawnPoint()
-    local plots = workspace:FindFirstChild("Plots")
-    if not plots then return nil end
-    for _, plot in ipairs(plots:GetChildren()) do
-        local sign = plot:FindFirstChild("PlotSign")
-        if sign and sign:FindFirstChild("YourBase", true) then
-            local sp = plot:FindFirstChild("SpawnPoint")
-            local pos = sp and PositionOfObj(sp)
-            if pos then return pos + Vector3.new(0, 3, 0) end
+    for _, rec in Runtime.Eggs do
+        local rid = RarityOf(rec.AssetCategory)
+        if rid and not seen[rid] then
+            seen[rid] = true
+            list[#list + 1] = rid
         end
     end
-    return nil
+    for uid, rid in Runtime.RarityByUid do
+        if Runtime.Eggs[uid] and rid and not seen[rid] then
+            seen[rid] = true
+            list[#list + 1] = rid
+        end
+    end
+    if #list == 0 then
+        for _, rid in FALLBACK_RARITIES do list[#list + 1] = rid end
+    end
+    table.sort(list, function(x, y) return RankOf(x) < RankOf(y) end)
+    Runtime.KnownRarities = {}
+    for _, rid in list do Runtime.KnownRarities[rid] = true end
+    return list
+end
+
+local function BuildBiomeOptions()
+    local seen, list = {}, {}
+    local areas = workspace:FindFirstChild("World")
+    areas = areas and areas:FindFirstChild("Areas")
+    areas = areas and areas:FindFirstChild("GuardAreas")
+    if areas then
+        for _, area in areas:GetChildren() do
+            local areaName = area.Name
+            if not area:GetAttribute("IntegrationStatus") and area:FindFirstChild("Nests") and not seen[areaName] then
+                seen[areaName] = true
+                list[#list + 1] = areaName
+            end
+        end
+    end
+    for _, rec in Runtime.Eggs do
+        local aid = rec.AreaId
+        if type(aid) == "string" and aid ~= "" and not seen[aid] then
+            seen[aid] = true
+            list[#list + 1] = aid
+        end
+    end
+    if #list == 0 then
+        for _, areaName in FALLBACK_BIOMES do list[#list + 1] = areaName end
+    end
+    return list
+end
+
+local function BuildPetRarityOptions()
+    local seen, list = {}, {}
+    if type(AssetsDir) == "table" then
+        for _, asset in AssetsDir do
+            if type(asset) == "table" and type(asset.Rarity) == "table" then
+                local rid = asset.Rarity._id
+                if type(rid) == "string" and (tonumber(asset.DropWeight) or 0) <= 0 and not seen[rid] then
+                    seen[rid] = true
+                    list[#list + 1] = rid
+                end
+            end
+        end
+    end
+    if #list == 0 then
+        for _, rid in FALLBACK_RARITIES do list[#list + 1] = rid end
+    end
+    table.sort(list, function(x, y) return RankOf(x) < RankOf(y) end)
+    return list
+end
+
+--==============================================================
+-- PROFILE MIRROR  (Money, EggInventory, Inventory, EquippedAssets)
+--==============================================================
+
+local function MergeInventoryDelta(current, delta)
+    if type(delta) ~= "table" then return end
+    local setPart = delta.Set
+    local removePart = delta.Remove
+    if type(setPart) == "table" then
+        for uid, entry in setPart do
+            current[tostring(uid)] = entry
+        end
+    end
+    if type(removePart) == "table" then
+        for k, v in removePart do
+            if type(v) == "string" then
+                current[v] = nil
+            elseif type(k) == "string" then
+                current[k] = nil
+            end
+        end
+    end
+    if setPart == nil and removePart == nil then
+        for uid, entry in delta do
+            current[tostring(uid)] = entry
+        end
+    end
+end
+
+local function OnProfileDelta(player, delta)
+    if player ~= LocalPlayer or type(delta) ~= "table" then return end
+    if type(delta.Money) == "number" then Runtime.Profile.Money = delta.Money end
+    if delta.EggInventory ~= nil then
+        MergeInventoryDelta(Runtime.Profile.EggInventory, delta.EggInventory)
+    end
+    if delta.Inventory ~= nil then
+        MergeInventoryDelta(Runtime.Profile.Inventory, delta.Inventory)
+    end
+    if delta.EquippedAssets ~= nil then
+        Runtime.Profile.EquippedAssets = delta.EquippedAssets
+    end
+end
+
+--==============================================================
+-- PLOTS + TREADMILL  (the sign text identifies YOUR plot; the
+-- server itself relocates you onto your treadmill - we never fly)
+--==============================================================
+
+local function NormName(text)
+    local trimmed = tostring(text or ""):gsub("@", "")
+    trimmed = trimmed:gsub("^%s+", ""):gsub("%s+$", "")
+    return trimmed:lower()
 end
 
 local function GetMyPlot()
     local plots = workspace:FindFirstChild("Plots")
     if not plots then return nil end
-
-    -- 1) your own sign carries the "YourBase" billboard (client-side marker)
-    for _, plot in ipairs(plots:GetChildren()) do
+    local myDisplay = NormName(LocalPlayer.DisplayName)
+    local myLogin = NormName(LocalPlayer.Name)
+    for _, plot in plots:GetChildren() do
         local sign = plot:FindFirstChild("PlotSign")
-        if sign and sign:FindFirstChild("YourBase", true) then return plot end
-    end
-
-    -- 2) sign label shows your name
-    local n1, n2 = Lower(LocalPlayer.Name), Lower(LocalPlayer.DisplayName)
-    for _, plot in ipairs(plots:GetChildren()) do
-        local sign = plot:FindFirstChild("PlotSign")
-        local label = sign and sign:FindFirstChild("PlayerName", true)
-        if label and label:IsA("TextLabel") then
-            local t = Lower(label.Text)
-            if t == n1 or t == n2 then return plot end
-        end
-    end
-
-    -- 3) this model only exists in your own plot
-    for _, plot in ipairs(plots:GetChildren()) do
-        if plot:FindFirstChild("LocalOfflineMoneyClaim") then return plot end
-    end
-    return nil
-end
-
-local function GetTreadmillSpot()
-    local plot = GetMyPlot()
-    local part = plot and plot:FindFirstChild("TreadmillBottom")
-    if part and part:IsA("BasePart") then
-        return part.Position + Vector3.new(0, 3.1, 0)
-    end
-    return nil
-end
-
---==============================================================
--- LIVE EGG DATA (passive listeners, connected only when needed)
---==============================================================
-
-local ListenersOn = false
-local DeliverPhase   -- forward declared (used by the Instant Steal prompt hook)
-local UidAtPos       -- forward declared
-
-local function IngestEgg(rec, depth)
-    if type(rec) ~= "table" or (depth or 0) > 3 then return end
-    if type(rec.Uid) == "string" then
-        local isNew = Eggs[rec.Uid] == nil
-        Eggs[rec.Uid] = rec
-        EggSeenAt[rec.Uid] = os.clock()
-        if tonumber(rec.CarrierUserId) == LocalPlayer.UserId then
-            CarriedUid, CarriedUidAt = rec.Uid, os.clock()
-        end
-        if rec.State == "Slot" then
-            local np = EggPosition(rec)
-            if np then NestPos[rec.Uid] = np end
-        end
-        pcall(OnEggSeen, rec, isNew)
-        return
-    end
-    for _, v in pairs(rec) do
-        if type(v) == "table" then IngestEgg(v, (depth or 0) + 1) end
-    end
-end
-
-local function StripRichText(s)
-    return tostring(s or ""):gsub("<[^>]->", "")
-end
-
-local function EnsureListeners()
-    if ListenersOn then return end
-    ListenersOn = true
-
-    local render = Net("RE/Treadmill/RenderStateShifted")
-    if render then
-        Track(render.OnClientEvent:Connect(function(plr, worn)
-            if plr == LocalPlayer then Worn = worn == true end
-        end))
-    end
-
-    local carry = Net("RE/EggWorld/FieldEggCarry")
-    if carry then
-        Track(carry.OnClientEvent:Connect(function(data)
-            if type(data) ~= "table" then return end
-            Carrying = data.IsCarrying == true
-            if Carrying and type(data.Uid) == "string" then
-                CarriedUid, CarriedUidAt = data.Uid, os.clock()
-            end
-        end))
-    end
-
-    local shifted = Net("RE/EggWorld/FieldEggShifted")
-    if shifted then Track(shifted.OnClientEvent:Connect(function(rec) IngestEgg(rec, 0) end)) end
-
-    local batch = Net("RE/EggWorld/FieldEggBatchShifted")
-    if batch then
-        Track(batch.OnClientEvent:Connect(function(data)
-            if type(data) ~= "table" then return end
-            if type(data.UpdatedRecords) == "table" then
-                for _, rec in ipairs(data.UpdatedRecords) do IngestEgg(rec, 0) end
-            end
-            if type(data.RemovedUids) == "table" then
-                for _, uid in ipairs(data.RemovedUids) do
-                    if type(uid) == "string" then Eggs[uid] = nil end
-                end
-            end
-        end))
-    end
-
-    -- the egg you carried made it into your inventory
-    local verdict = Net("RE/EggWorld/FieldEggRedeemVerdict")
-    if verdict then
-        Track(verdict.OnClientEvent:Connect(function(data)
-            if type(data) == "table" then
-                LastVerdict, LastVerdictAt = data, os.clock()
-                SessionStats.redeemed += 1
-                Log(string.format("REDEEMED: %s (%s)", tostring(data.DisplayName), tostring(data.Rarity)))
-            end
-        end))
-    end
-
-    -- your owned egg records (for Auto Place / Auto Hatch)
-    local owner = Net("RE/EggWorld/OwnerShifted")
-    if owner then
-        Track(owner.OnClientEvent:Connect(function(data)
-            if type(data) == "table" and tonumber(data.OwnerUserId) == LocalPlayer.UserId
-                and type(data.Records) == "table" then
-                MyEggRecords = data.Records
-            end
-        end))
-    end
-
-    local gone = Net("RE/EggWorld/FieldEggGone")
-    if gone then
-        Track(gone.OnClientEvent:Connect(function(uid)
-            if type(uid) == "string" then
-                Eggs[uid] = nil
-                if CarriedUid == uid then CarriedUid = nil end
-            end
-        end))
-    end
-
-    -- the server's own rare-spawn announcements ("A Secret ... spawned in ...!")
-    local shown = Net("RE/EggWorld/FieldEggRaritiesShown")
-    if shown then
-        Track(shown.OnClientEvent:Connect(function(data)
-            if not RareSpawnAlert or type(data) ~= "table" then return end
-            local spawns = type(data.RareSpawns) == "table" and data.RareSpawns or {}
-            for _, entry in ipairs(spawns) do
-                if type(entry) == "table" then
-                    Notify("Rare Spawn", StripRichText(entry.Message), "success", 6)
-                    Log("RARE SPAWN: " .. StripRichText(entry.Message))
-                end
-            end
-        end))
-    end
-
-    Track(ProximityPromptService.PromptTriggered:Connect(function(prompt, plr)
-        if plr ~= LocalPlayer then return end
-        LastTriggered = os.clock()
-
-        -- Instant Steal: you clicked Steal; the game asks the server itself, then we
-        -- take over and fly the egg home (Forest drop -> re-steal -> spawn).
-        if InstantSteal and not Busy and IsStealPrompt(prompt) then
-            Busy = true
-            local id = NewJob()
-            local origin = PromptPosition(prompt)
-            task.spawn(function()
-                local ok, err = pcall(function()
-                    if not WaitForCarry(2.5, id) then
-                        Notify("Instant Steal", "The steal did not register (satchel full?).", "warning", 4)
-                        return
+        if sign then
+            for _, node in sign:GetDescendants() do
+                if node:IsA("TextLabel") then
+                    local label = NormName(node.Text)
+                    if label ~= "" and (label == myDisplay or label == myLogin) then
+                        return plot
                     end
-                    local uid = CarriedUid or (origin and UidAtPos(origin, 14))
-                    SessionStats.stolen += 1
-                    DeliverPhase(id, uid, origin)
-                end)
-                if not ok then Notify("Steal", "Workflow error: " .. tostring(err), "error", 5) end
-                CamRelease()
-                EndFlight()
-                Busy = false
-            end)
-        end
-    end))
-
-    -- Instant Steal: shorten hold time on prompts as they appear
-    Track(ProximityPromptService.PromptShown:Connect(function(prompt)
-        if InstantSteal then ApplyFast(prompt) end
-    end))
-end
-
-local function RefreshSnapshot()
-    local rf = Net("RF/EggWorld/AskFieldEggSnapshot")
-    if not rf or not rf:IsA("RemoteFunction") then return false end
-    local ok, result = pcall(function() return rf:InvokeServer() end)
-    if ok then IngestEgg(result, 0) end
-    return ok
-end
-
---==============================================================
--- RARITY (live from the game's own asset catalog)
---==============================================================
-
-local RarityRanks = {}
-local AssetDirectory = nil
-
-pcall(function()
-    local assets = require(ReplicatedStorage.Data.Assets)
-    if type(assets) == "table" and type(assets.Directory) == "table" then
-        AssetDirectory = assets.Directory
-    end
-end)
-pcall(function()
-    local rarities = require(ReplicatedStorage.Data.Rarity)
-    if type(rarities) == "table" and type(rarities.Rarities) == "table" then
-        for name, cfg in pairs(rarities.Rarities) do
-            if type(cfg) == "table" and type(cfg.Rank) == "number" then
-                RarityRanks[name] = cfg.Rank
+                end
             end
         end
     end
-end)
-if next(RarityRanks) == nil then
-    RarityRanks = table.clone(FALLBACK_RANKS)
-end
-
-local function RankOf(name)
-    return RarityRanks[name] or FALLBACK_RANKS[name] or 0
-end
-
--- returns rarity id (or nil)
-local function ResolveRarity(rec)
-    local cat = rec.AssetCategory
-    if type(cat) ~= "string" or cat == "" then return nil end
-    if RarityCache[cat] then return RarityCache[cat] end
-
-    local found = nil
-    if AssetDirectory then
-        local entry = AssetDirectory[cat]
-        local rar = type(entry) == "table" and entry.Rarity
-        if type(rar) == "table" and type(rar._id) == "string" then
-            found = rar._id
-        end
+    if Runtime.MyPlotSlot then
+        return plots:FindFirstChild(tostring(Runtime.MyPlotSlot))
     end
-    if not found then
-        local n = Lower(cat)
-        for _, pair in ipairs(NAME_RARITY_FALLBACK) do
-            if string.find(n, pair[1], 1, true) then found = pair[2]; break end
-        end
-    end
-    if found == "Prismatic" then found = "Rainbow" end
-    if found then RarityCache[cat] = found end
-    return found
-end
-
-DescribeEgg = function(rec)
-    local rarity = ResolveRarity(rec)
-    return string.format("%s | %s | %s", tostring(rec.AssetCategory), tostring(rec.AreaId), rarity or "rarity?")
-end
-
-local function MySpeed()
-    local ls = LocalPlayer:FindFirstChild("leaderstats")
-    local sp = ls and ls:FindFirstChild("Speed")
-    return sp and tonumber(sp.Value) or 0
-end
-
--- guard danger read live from the area's GuardEscapeSpeeds attribute (Vector2: need, run)
-GuardDanger = function(area)
-    if type(area) ~= "string" then return false end
-    local need
-    local ok, areas = pcall(function() return workspace.World.Areas.GuardAreas end)
-    if ok and areas then
-        local model = areas:FindFirstChild(area)
-        local attr = model and model:GetAttribute("GuardEscapeSpeeds")
-        if typeof(attr) == "Vector2" then need = attr.X end
-    end
-    if not need then
-        local g = GUARD[area]
-        need = g and g.need
-    end
-    return need ~= nil and MySpeed() < need
-end
-
---==============================================================
--- EGG FILTERS / SELECTION
---==============================================================
-
-local function Norm(text)
-    return (Lower(text):gsub("[%s_%-]", ""))
-end
-
-local function SetSize(set)
-    local n = 0
-    for _ in pairs(set) do n += 1 end
-    return n
-end
-
-local function RarityFilterOn()
-    local n = SetSize(SelectedRarities)
-    return n > 0 and n < #RARITY_LIST
-end
-
-local function BiomeFilterOn()
-    local n = SetSize(SelectedBiomes)
-    return n > 0 and n < #BIOMES
-end
-
-EggPosition = function(rec)
-    local cf = rec.BottomCFrame or rec.BoundsCFrame
-    if typeof(cf) == "CFrame" then return cf.Position end
     return nil
 end
 
--- returns egg-info or nil, plus a reason string
-local function EvaluateEgg(rec)
-    local state = rec.State
-    if state ~= nil and state ~= "Slot" and state ~= "Dropped" then return nil, "state " .. tostring(state) end
-
-    local pos = EggPosition(rec)
-    if not pos then return nil, "no position" end
-
-    local rarity = ResolveRarity(rec)
-
-    if RarityFilterOn() then
-        if rarity then
-            if not SelectedRarities[rarity] then return nil, "rarity " .. rarity end
-        elseif not AllowUnknownRarity then
-            return nil, "rarity unknown"
+-- free spot on the plot grid: >= 5 studs from every existing Placement
+local function FindPlacementSpot()
+    local taken = {}
+    for _, entry in Runtime.Profile.EggInventory do
+        if type(entry) == "table" and type(entry.Placement) == "table"
+            and typeof(entry.Placement.LocalCFrame) == "CFrame" then
+            local spotPos = entry.Placement.LocalCFrame.Position
+            taken[#taken + 1] = { X = spotPos.X, Z = spotPos.Z }
         end
     end
-
-    if BiomeFilterOn() and not SelectedBiomes[Norm(rec.AreaId)] then
-        return nil, "biome " .. tostring(rec.AreaId)
-    end
-
-    if SkipDangerous and GuardDanger(tostring(rec.AreaId)) then
-        return nil, "guard too strong"
-    end
-
-    return {
-        Uid = rec.Uid, Pos = pos, Rarity = rarity, Rank = rarity and RankOf(rarity) or 0,
-        Area = tostring(rec.AreaId), Category = tostring(rec.AssetCategory),
-        Size = tonumber(rec.AssetScale) or 0,
-    }, "ok"
-end
-
-local function PickBestEgg()
-    local r = Root()
-    if not r then return nil end
-
-    local best, count = nil, 0
-    for uid, rec in pairs(Eggs) do
-        if (AttemptedUntil[uid] or 0) < os.clock() then
-            local e = EvaluateEgg(rec)
-            if e then
-                count += 1
-                e.Dist = (e.Pos - r.Position).Magnitude
-                local better
-                if not best then
-                    better = true
-                elseif Priority == "Nearest" then
-                    better = e.Dist < best.Dist
-                elseif Priority == "Biggest Size" then
-                    better = e.Size > best.Size or (e.Size == best.Size and e.Dist < best.Dist)
-                else
-                    better = e.Rank > best.Rank or (e.Rank == best.Rank and e.Dist < best.Dist)
+    local xOffsets = { -8, -6, -4, -2, 0, 2, 4, 6, 8 }
+    local zOffsets = { -4, -6, -8, -10, -12, -14, -16 }
+    for _, zz in zOffsets do
+        for _, xx in xOffsets do
+            local free = true
+            for _, point in taken do
+                local dx, dz = point.X - xx, point.Z - zz
+                if dx * dx + dz * dz < 25 then
+                    free = false
+                    break
                 end
-                if better then best = e end
             end
+            if free then return xx, zz end
         end
     end
-    return best, count
+    return nil
 end
 
-Log = function(text, color)
-    if ScanLog then pcall(function() ScanLog:Add(text, color) end) end
+--==============================================================
+-- WORLD POINTS  (SafeZone / Spawn / Forest middle)
+--==============================================================
+
+local function WeakKeyed()
+    return setmetatable({}, { __mode = "k" })
 end
 
-local function JoinCounts(t)
-    local parts = {}
-    for k, v in pairs(t) do table.insert(parts, tostring(k) .. "=" .. tostring(v)) end
-    table.sort(parts)
-    return #parts > 0 and table.concat(parts, ", ") or "-"
+Runtime.MotorBase = WeakKeyed()
+Runtime.KnownPhysics = WeakKeyed()
+Runtime.SavedCollide = WeakKeyed()
+
+local function GetSafeZonePart()
+    local world = workspace:FindFirstChild("World")
+    local areas = world and world:FindFirstChild("Areas")
+    local bounds = areas and areas:FindFirstChild("EggCarryBounds")
+    local zone = bounds and bounds:FindFirstChild("SafeZone")
+    if zone and zone:IsA("BasePart") then return zone end
+    return nil
 end
 
-local function RunScan()
-    EnsureListeners()
-    RefreshSnapshot()
+local function InSafeZone(pos)
+    local zone = GetSafeZonePart()
+    if zone then
+        local rel = zone.CFrame:PointToObjectSpace(pos)
+        return math.abs(rel.X) <= zone.Size.X / 2 and math.abs(rel.Z) <= zone.Size.Z / 2
+    end
+    return pos.X >= SAFEZONE_FALLBACK.X - SAFEZONE_FALLBACK.HX
+       and pos.X <= SAFEZONE_FALLBACK.X + SAFEZONE_FALLBACK.HX
+       and pos.Z >= SAFEZONE_FALLBACK.Z - SAFEZONE_FALLBACK.HZ
+       and pos.Z <= SAFEZONE_FALLBACK.Z + SAFEZONE_FALLBACK.HZ
+end
 
-    local total, passed = 0, 0
-    local states, reasons, samples = {}, {}, {}
+local function SpawnPoint()
+    local spawnPart = workspace:FindFirstChild("SpawnLocation")
+    if spawnPart and spawnPart:IsA("BasePart") then
+        return spawnPart.Position + Vector3.new(0, STOP_ABOVE, 0)
+    end
+    local zone = GetSafeZonePart()
+    if zone then
+        return zone.Position + Vector3.new(0, STOP_ABOVE, 0)
+    end
+    return Vector3.new(512.7, 68.1 + STOP_ABOVE, -362.6)
+end
 
-    for _, rec in pairs(Eggs) do
-        total += 1
-        local st = tostring(rec.State)
-        states[st] = (states[st] or 0) + 1
+local function ForestMiddle()
+    local world = workspace:FindFirstChild("World")
+    local areas = world and world:FindFirstChild("Areas")
+    local guards = areas and areas:FindFirstChild("GuardAreas")
+    local forest = guards and guards:FindFirstChild("Forest")
+    local basePos = Vector3.new(602.1, 90.2, -372.0)
+    if forest then
+        local okPivot, pivot = pcall(function() return forest:GetPivot() end)
+        if okPivot and typeof(pivot) == "CFrame" then basePos = pivot.Position end
+    end
+    local probe = RayDown(Vector3.new(basePos.X, basePos.Y + 60, basePos.Z), 300)
+    local groundY = probe and probe.Position.Y or 67
+    return Vector3.new(basePos.X, groundY, basePos.Z)
+end
 
-        local egg, reason = EvaluateEgg(rec)
-        if egg then passed += 1 else reasons[reason] = (reasons[reason] or 0) + 1 end
+--==============================================================
+-- STEAL CORE  (Direct Escape: no waiting at the nest - the escape
+-- glide starts in the same breath as the confirmed carry)
+--==============================================================
 
-        if #samples < 8 then
-            table.insert(samples, string.format("%s | %s | %s | %s | %s",
-                tostring(rec.AssetCategory), tostring(rec.AreaId), st,
-                egg and "MATCH" or reason,
-                GuardDanger(tostring(rec.AreaId)) and "guard chases" or "guard safe"))
+local function RequestCarry(rec)
+    local node = Net("RF", "EggWorld/AskFieldEggCarry")
+    local args = { Uid = rec.Uid }
+    if type(rec.Uid) == "string" and rec.Uid:sub(1, 14) == "FirstAreaEgg_" then
+        args.FirstAreaSlotKey = tostring(rec.AreaId) .. ":" .. tostring(rec.NestId or "")
+    end
+    local lastWhy = "denied"
+    for _ = 1, CARRY_RETRIES do
+        local ok, result = InvokeRemote(node, args)
+        if ok and result == true then return true, nil end
+        local text = ""
+        if type(result) == "string" then
+            text = result
+        elseif not ok then
+            text = tostring(result)
         end
+        if text:lower():find("satchel", 1, true) then return false, "satchel" end
+        if text ~= "" then lastWhy = text end
+        task.wait(CARRY_RETRY_GAP)
     end
-
-    local head = string.format("%d tracked, %d match", total, passed)
-    Log("---- Scan: " .. head)
-    Log("my speed stat: " .. tostring(MySpeed()))
-    Log("states: " .. JoinCounts(states))
-    Log("skipped: " .. JoinCounts(reasons))
-    for _, line in ipairs(samples) do Log(line) end
-
-    Notify("Scan", head, passed > 0 and "success" or "warning", 5)
+    return false, lastWhy
 end
 
-OnEggSeen = function(rec, isNew)
-    if not EggAlert or not isNew or rec.State ~= "Slot" then return end
-    local egg = EvaluateEgg(rec)
-    if egg then
-        Notify("Egg Alert", string.format("%s · %s · %s", egg.Rarity or "?", egg.Category, egg.Area), "success", 5)
+local function AwaitVerdict(uid, token, maxWait)
+    local deadline = os.clock() + (maxWait or VERDICT_WAIT)
+    while os.clock() < deadline do
+        if not TokenAlive(token) then return "cancelled" end
+        if Runtime.Carry.Redeemed or Runtime.LastVerdictUid == uid then return "redeemed" end
+        if Runtime.Eggs[uid] == nil and not Runtime.Carry.IsCarrying then return "redeemed" end
+        if Runtime.Carry.LostAt > 0 then return "lost" end
+        task.wait(0.05)
     end
+    if Runtime.Carry.IsCarrying then return "timeout" end
+    return "redeemed"
 end
 
--- which egg is at a position (used when a manual steal prompt fires)
-UidAtPos = function(pos, maxDist)
-    local bestUid, bestDist = nil, maxDist or 8
-    local flat = Vector3.new(pos.X, 0, pos.Z)
-    for uid, rec in pairs(Eggs) do
-        local p = NestPos[uid] or EggPosition(rec)
-        if p then
-            local d = (Vector3.new(p.X, 0, p.Z) - flat).Magnitude
-            if d < bestDist then bestUid, bestDist = uid, d end
-        end
-    end
-    return bestUid
-end
-
--- wait until a ragdoll / knock-down is over (after a guard hit)
-local function WaitStable(id, extra)
-    local t0 = os.clock()
-    while os.clock() - t0 < 4 do
-        if Cancelled(id) then return end
-        local h, r = Hum(), Root()
-        if not h or not r then return end
-        local st = h:GetState()
-        local down = h.PlatformStand or st == Enum.HumanoidStateType.Ragdoll
-            or st == Enum.HumanoidStateType.FallingDown or st == Enum.HumanoidStateType.Physics
-            or r.AssemblyLinearVelocity.Magnitude > 150
-        if not down then break end
+local function WaitEggRecoverable(uid, token)
+    local ragdollDeadline = os.clock() + RAGDOLL_WAIT_MAX
+    while os.clock() < ragdollDeadline and IsRagdolled() do
+        if not TokenAlive(token) then return nil end
         task.wait(0.1)
     end
-    task.wait(extra or 0.2)
-end
-
---==============================================================
--- STEAL WORKFLOW (flight + direct remotes)
---   TryCarry      : fly to the egg (live position) and steal it via the remote
---   DeliverPhase  : fly it home - optionally dropping at the Forest EggPoint first,
---                   re-stealing, then crossing into the SafeZone (redeem)
---==============================================================
-
--- fly to the egg's current position and steal it. true, or false + reason
-local function TryCarry(uid, id)
-    WaitStable(id, 0.2)
-
-    local lastErr = "no record"
-    for attempt = 1, 4 do
-        if Cancelled(id) then return false, "cancelled" end
-
-        local rec = Eggs[uid]
-        if rec == nil then return false, "egg gone" end
-        local pos = EggPosition(rec) or NestPos[uid]
-        if not pos then return false, "no position" end
-
-        CamLock(pos)
-        local ok = FlyTo(pos, id, { HoverY = 3 })
-        CamRelease()
-        if Cancelled(id) then return false, "cancelled" end
-        if ok then
-            -- ask the server; retry a few times, re-approaching if it moved
-            for _ = 1, 6 do
-                if Cancelled(id) then return false, "cancelled" end
-                local r2 = Eggs[uid]
-                if r2 == nil then return false, "egg gone" end
-                local carried, err = CarryEggRemote(r2)
-                if carried and WaitForCarry(0.8, id) then
-                    SessionStats.stolen += 1
-                    return true
-                end
-                lastErr = err or lastErr
-                if string.find(Lower(lastErr), "satchel") then
-                    PauseUntil = os.clock() + 15
-                    return false, "satchel full"
-                end
-                local p2 = EggPosition(r2)
-                if p2 and (p2 - pos).Magnitude > 6 then
-                    pos = p2
-                    FlyTo(p2, id, { HoverY = 3 })
-                else
-                    task.wait(0.15)
-                end
-            end
-        else
-            lastErr = "could not reach the egg"
+    local deadline = os.clock() + EGG_RECOVER_WAIT
+    while os.clock() < deadline do
+        if not TokenAlive(token) then return nil end
+        local rec = Runtime.Eggs[uid]
+        if not rec then return nil end
+        local state = rec.State
+        if state == "Slot" or state == "Dropped" then return rec end
+        if state == "Claimed" then return nil end
+        if state == "Carried" then
+            if rec.CarrierUserId == LocalPlayer.UserId then return rec end
+            return nil -- another player took it
         end
         task.wait(0.2)
     end
-    return false, lastErr
+    return nil
 end
 
--- after the drop at the Forest EggPoint: take the dropped egg back before the guard
--- carries it away. true, or false + reason
-local function ReStealAtDrop(uid, id)
-    local t0 = os.clock()
-    while os.clock() - t0 < 6 do
-        if Cancelled(id) then return false, "cancelled" end
+-- one full attempt. Outcomes: delivered | frienddropped | lost | gone |
+-- satchel | cancelled | dead | carrying | carry | trick | drop | <glide reason>
+local function AttemptSteal(rec, token, mode, useTrick, holdNestCam)
+    local uid = rec.Uid
+    local fresh = Runtime.Eggs[uid]
+    if fresh then rec = fresh end
+    local eggPos = RecordPos(rec)
+    if not eggPos then return "gone" end
+    if Runtime.Carry.IsCarrying then return "carrying" end
 
-        local rec = Eggs[uid]
-        if rec == nil then return false, "egg gone" end
-
-        if rec.State == "GuardCarried" then
-            -- the guard got it: recovery will chase the guard's live position
-            Log("The guard picked the egg up.")
-            return false, "guard has it"
-        end
-
-        local carried, err = CarryEggRemote(rec)
-        if carried and WaitForCarry(0.6, id) then
-            Log("Re-stole the egg.")
-            return true
-        end
-        if err and string.find(Lower(err), "satchel") then
-            PauseUntil = os.clock() + 15
-            return false, "satchel full"
-        end
-        task.wait(0.15)
-    end
-    return false, "re-steal window passed"
-end
-
--- wait for the SafeZone redeem (FieldEggGone / RedeemVerdict). "redeemed" | "lost" | "still"
-local function WaitRedeemed(id, uid, started)
-    local function check()
-        if LastVerdictAt >= started then return "redeemed" end
-        local rec = uid and Eggs[uid]
-        if uid and rec == nil then return "redeemed" end
-        if rec and rec.State == "Claimed" then return "redeemed" end
-        if not IsCarryingNow() then
-            if rec == nil then return "redeemed" end
-            if rec.State ~= "Carried" or tonumber(rec.CarrierUserId) ~= LocalPlayer.UserId then
-                return "lost"
-            end
-        end
-        return nil
+    -- leave the treadmill first (the server doffs and relocates by itself)
+    if Runtime.Treadmill.Worn then
+        FeatureInvoke("AutoTreadmill", Net("RF", "Treadmill/AskDoff"))
+        Runtime.Treadmill.Worn = false
+        Runtime.Treadmill.UnwornAt = os.clock()
     end
 
-    local t0 = os.clock()
-    while os.clock() - t0 < 8 do
-        if Cancelled(id) then return "cancelled" end
-        local v = check()
-        if v then return v end
-        task.wait(0.1)
+    local rarity = RarityOf(rec.AssetCategory) or Runtime.RarityByUid[uid]
+    SetStatus(("Steal: %s egg - %s"):format(rarity or "?", tostring(rec.AreaId or "?")))
+
+    FocusOn(eggPos)
+
+    local _, _, root = Char()
+    if not root then return "dead" end
+    local distance = (eggPos - root.Position).Magnitude
+
+    local approachCheck = function()
+        if Runtime.Eggs[uid] == nil then return true, "gone" end
+        if Runtime.Carry.IsCarrying then return true, "carrying" end
+        return false
     end
 
-    -- still carrying? fly deeper into the safe zone (your plot) and wait again
-    local plot = PlotSpawnPoint()
-    if plot then
-        FlyTo(plot, id, { MustCarry = true, Offset = 12 })
-        local t1 = os.clock()
-        while os.clock() - t1 < 4 do
-            if Cancelled(id) then return "cancelled" end
-            local v = check()
-            if v then return v end
-            task.wait(0.1)
+    if distance > TWOLEG_DISTANCE then
+        local flat = Vector3.new(eggPos.X - root.Position.X, 0, eggPos.Z - root.Position.Z)
+        local staging = eggPos
+        if flat.Magnitude > 1 then
+            staging = eggPos - (flat / flat.Magnitude) * TWOLEG_BACKOFF
         end
+        local okLeg, whyLeg = Glide(
+            Vector3.new(staging.X, eggPos.Y + STOP_ABOVE, staging.Z),
+            token, { Check = approachCheck })
+        if not okLeg then
+            ReleaseCamera()
+            return whyLeg
+        end
+        PreStream(eggPos)
+        local refetched = Runtime.Eggs[uid]
+        if refetched then
+            local refetchedPos = RecordPos(refetched)
+            if refetchedPos then eggPos = refetchedPos end
+        end
+    else
+        PreStream(eggPos)
     end
 
-    if not IsCarryingNow() then return "redeemed" end
-    Log("WARNING: still carrying at home - the redeem did not trigger.")
-    return "still"
-end
-
--- You are carrying. Fly it home. Returns "redeemed" | "lost" | "cancelled" | "failed".
-local function DeliverCarriedHome(id, uid, started)
-    SetStatus("Flying home")
-    local ok, why = FlyTo(HomePoint(), id, { MustCarry = true })
-    if not ok then
-        if why == "lost" then return "lost" end
-        if why == "cancelled" then return "cancelled" end
-        return "failed"
+    local okApproach, whyApproach = Glide(eggPos + Vector3.new(0, STOP_ABOVE + 0.5, 0), token, { Check = approachCheck })
+    if not okApproach then
+        ReleaseCamera()
+        return whyApproach
     end
-    SetStatus("Waiting for the redeem")
-    return WaitRedeemed(id, uid, started)
-end
 
-DeliverPhase = function(id, uid, originHint)
-    local started = os.clock()
-    local recoveries = 0
-
-    while true do
-        if Cancelled(id) then return "cancelled" end
-        if not IsCarryingNow() then return "lost" end
-
-        local rec = uid and Eggs[uid]
-        if rec then
-            Log("Carrying: " .. DescribeEgg(rec))
-            SetStatus("Carrying " .. tostring(rec.AssetCategory))
-        end
-
-        -- strategy: stop at the Forest EggPoint, drop, re-steal, then fly home.
-        -- the Forest guard is the weakest in the game and can never catch you, and
-        -- the EggPoint is the closest drop spot to the SafeZone.
-        local dropPos, dropName = DropPointPos()
-
-        if Strategy == "Direct Flight Home" or not dropPos then
-            local res = DeliverCarriedHome(id, uid, started)
-            if res == "lost" or res == "redeemed" or res == "cancelled" or res == "still" then return res end
-            return res
-        end
-
-        SetStatus("Flying to the " .. tostring(dropName) .. " drop point")
-        local ok, why = FlyTo(dropPos, id, { MustCarry = true })
-        if not ok then
-            if why == "lost" then
-                Log("The egg was taken from me on the way.")
-            elseif why == "cancelled" then
-                return "cancelled"
-            else
-                Log("Could not reach the drop point (" .. tostring(why) .. "); flying home directly.")
-                local res = DeliverCarriedHome(id, uid, started)
-                if res ~= "failed" then return res end
-            end
-        else
-            if CFG.StopDelay > 0 then task.wait(CFG.StopDelay) end
-            if Cancelled(id) then return "cancelled" end
-            if not IsCarryingNow() then
-                Log("The egg left me at the drop point.")
-            else
-                SetStatus("Dropping")
-                local dropped, derr = DropEggRemote()
-                if not dropped then
-                    dropped, derr = DropEggRemote()
-                end
-                if not WaitFor(function() return not IsCarryingNow() end, 1.2, id, 0.05) then
-                    if not IsCarryingNow() then
-                        Log("Dropped (late confirmation).")
-                    else
-                        Log("Drop not confirmed (" .. tostring(derr) .. ").")
-                        return "failed"
-                    end
-                else
-                    Log("Dropped at the " .. tostring(dropName) .. " EggPoint.")
-                end
-
-                if not ReStealAtDrop(uid, id) and not IsCarryingNow() then
-                    Log("Re-steal failed; going to recovery.")
-                end
-            end
-        end
-
-        if IsCarryingNow() then
-            local res = DeliverCarriedHome(id, uid, started)
-            if res == "redeemed" or res == "cancelled" or res == "still" then return res end
-            if res ~= "lost" then return res end
-        end
-
-        -- the egg is gone from us: go back for it
-        recoveries += 1
-        if recoveries > CFG.MaxRecoveries then
-            return "lost"
-        end
-        SessionStats.recovered += 1
-        Log("Recovery " .. recoveries .. " of " .. CFG.MaxRecoveries)
-        SetStatus("Going back for the egg")
-
-        WaitStable(id, 0.5)
-        local carried, err = TryCarry(uid, id)
-        if not carried then
-            Log("Could not take the egg back: " .. tostring(err))
-            return "lost"
-        end
-    end
-end
-
--- full cycle: pick target is done by the caller; fly there, steal, deliver.
--- returns true, "redeemed"/"gone" | false, reason
-local function RunStealCycle(id, egg)
-    AttemptedUntil[egg.Uid] = os.clock() + 30
-    local uid = egg.Uid
-
-    Log(string.format("Target: %s | %s | %s%s", egg.Category, egg.Area, egg.Rarity or "rarity?",
-        GuardDanger(egg.Area) and " | guard will chase" or ""))
-    Notify("Steal", string.format("%s · %s · %s", egg.Rarity or "?", egg.Category, egg.Area), "info", 3)
-
-    -- Phase 1: approach and steal
-    local carried, err = TryCarry(uid, id)
+    -- carry: accept true, retry 3x, never wait, never read the GUI
+    local carried, carryWhy = RequestCarry(rec)
     if not carried then
-        return false, err
+        ReleaseCamera()
+        if carryWhy == "satchel" then return "satchel" end
+        return "carry"
     end
-    Log("Stole the egg.")
+    Runtime.Carry = { IsCarrying = true, Uid = uid, Redeemed = false, LostAt = 0 }
 
-    -- Phase 2: deliver (with recovery)
-    local res = DeliverPhase(id, uid, egg.Pos)
-    if res == "redeemed" or res == "still" then
-        SetStatus(string.format("Done (redeemed %d this session)", SessionStats.redeemed))
-        if LastVerdict and LastVerdictAt >= (os.clock() - 12) then
-            Notify("Steal", string.format("Redeemed: %s (%s)",
-                tostring(LastVerdict.DisplayName), tostring(LastVerdict.Rarity)), "success", 5)
-        else
-            Notify("Steal", "Cycle complete.", "success", 3)
+    -- optional Nest Drop Trick: only on the retry of an egg we lost before
+    if useTrick then
+        task.wait(0.05)
+        InvokeRemote(Net("RF", "EggWorld/AskFieldEggDrop"), { Reason = "PlayerRequest" })
+        Runtime.Carry = { IsCarrying = false, Uid = uid, Redeemed = false, LostAt = 0 }
+        task.wait(0.15)
+        local recarried, recarryWhy = RequestCarry(rec)
+        if not recarried then
+            ReleaseCamera()
+            if recarryWhy == "satchel" then return "satchel" end
+            return "trick"
         end
-        return true, res
+        Runtime.Carry = { IsCarrying = true, Uid = uid, Redeemed = false, LostAt = 0 }
     end
-    return false, res
+
+    -- ESCAPE - destination chosen by mode, camera handled per mode
+    local nestPos = eggPos
+    if holdNestCam then
+        FocusOn(nestPos)
+    else
+        ReleaseCamera()
+    end
+    local destination
+    if mode == "friend" then
+        destination = ForestMiddle()
+        SetStatus("Escaping -> Forest (friend)")
+    else
+        destination = SpawnPoint()
+        SetStatus("Escaping -> SafeZone")
+    end
+
+    local escapeCheck = function(pos)
+        if Runtime.Carry.LostAt > 0 and not Runtime.Carry.Redeemed then
+            return true, "lost"
+        end
+        if holdNestCam and Runtime.CamFocus then
+            local flatFromNest = math.sqrt((pos.X - nestPos.X) ^ 2 + (pos.Z - nestPos.Z) ^ 2)
+            if flatFromNest > 40 then ReleaseCamera() end
+        end
+        return false
+    end
+
+    local okEsc, whyEsc = Glide(destination, token, { Check = escapeCheck })
+    if not okEsc then return whyEsc end
+
+    if mode == "friend" then
+        -- drop at the Forest middle, do NOT re-steal, glide 30 studs away
+        InvokeRemote(Net("RF", "EggWorld/AskFieldEggDrop"), { Reason = "PlayerRequest" })
+        Runtime.Carry = { IsCarrying = false, Uid = nil, Redeemed = false, LostAt = 0 }
+        local awayFlat = Vector3.new(SpawnPoint().X - destination.X, 0, SpawnPoint().Z - destination.Z)
+        if awayFlat.Magnitude > 1 then
+            Glide(destination + (awayFlat / awayFlat.Magnitude) * 30, token, { Timeout = 15 })
+        end
+        return "frienddropped"
+    end
+
+    local verdict = AwaitVerdict(uid, token, VERDICT_WAIT)
+    if verdict == "redeemed" then return "delivered" end
+    if verdict == "lost" then return "lost" end
+    if verdict == "cancelled" then return "cancelled" end
+    return "noverdict"
 end
 
 --==============================================================
--- AUTO STEAL LOOP + TREADMILL LOOP
+-- STEAL JOB  (up to MAX_RECOVERIES retries, then blacklist)
 --==============================================================
 
-local GetOffTreadmillSafe, GoToTreadmill, DesiredWalkSpeedSafe  -- forward declared
+local ManualEscapeJob -- forward: shared by Instant Steal + Help Friend
 
-local LoopStarted = false
-
-local function StartLoop()
-    if LoopStarted then return end
-    LoopStarted = true
-
-    task.spawn(function()
-        while not Unloaded do
-            task.wait(0.5)
-            if Unloaded then break end
-            if Busy or os.clock() < PauseUntil then continue end
-            if not Root() then continue end
-
-            -- 1) filtered auto steal
-            if AutoSteal then
-                if IsCarryingNow() then
-                    -- already holding something: deliver it before taking more
-                    Busy = true
-                    local id = NewJob()
-                    local ok, err = pcall(DeliverPhase, id, CarriedUid, nil)
-                    if not ok then Notify("Auto Steal", "Error: " .. tostring(err), "error", 4) end
-                    CamRelease(); EndFlight(); Busy = false
-                    continue
+local function StealJob(rec, mode)
+    local token = NewToken()
+    Runtime.Busy = true
+    Runtime.JobMode = mode
+    local uid = rec.Uid
+    local ok, err = pcall(function()
+        local attempts = 0
+        local lastOutcome = "unknown"
+        local bail = false
+        while attempts < 1 + MAX_RECOVERIES and not bail do
+            attempts += 1
+            local outcome = AttemptSteal(rec, token, mode, attempts > 1, false)
+            lastOutcome = outcome
+            if outcome == "delivered" then
+                Runtime.JobFailures[uid] = nil
+                Notify("Steal", "Egg delivered to the SafeZone.", "success", 4)
+                SetStatus("Delivered")
+                return
+            elseif outcome == "frienddropped" then
+                Runtime.JobFailures[uid] = nil
+                Notify("Help Friend", "Egg dropped at the Forest middle for your friend.", "success", 4)
+                SetStatus("Dropped for friend")
+                return
+            elseif outcome == "lost" and attempts <= MAX_RECOVERIES then
+                SetStatus(("Recovering egg (%d/%d)"):format(attempts, MAX_RECOVERIES))
+                local recovered = WaitEggRecoverable(uid, token)
+                if not recovered then return end
+                if Blacklisted(uid) then return end
+                rec = recovered
+            elseif outcome == "cancelled" or outcome == "dead" then
+                return -- death / toggle off: no penalty
+            elseif outcome == "satchel" then
+                Runtime.PauseUntil = os.clock() + SATCHEL_PAUSE
+                SetStatus("Satchel full - paused 15s")
+                return
+            elseif outcome == "gone" then
+                return -- the egg no longer exists: no penalty, nothing to retry
+            elseif outcome == "carrying" then
+                -- something else put an egg in our hands mid-flight: hand it over
+                local heldUid = Runtime.Carry.Uid
+                if heldUid and (FlagOn("HelpFriend") or FlagOn("InstantSteal")) then
+                    Runtime.Busy = false
+                    task.spawn(ManualEscapeJob, heldUid)
                 end
-                local egg = PickBestEgg()
-                if egg then
-                    Busy = true
-                    local id = NewJob()
-                    GetOffTreadmillSafe()
-                    local ok, result, why = pcall(RunStealCycle, id, egg)
-                    if not ok then Notify("Auto Steal", "Error: " .. tostring(result), "error", 4) end
-                    CamRelease(); EndFlight(); Busy = false
-                    continue
+                return
+            else
+                bail = true -- plain failure: fall through to the failure handling
+            end
+        end
+        if lastOutcome == "ground" then
+            BlacklistUid(uid, BLACKLIST_GROUND)
+        elseif lastOutcome == "region" then
+            BlacklistUid(uid, 60)
+        end
+        Runtime.JobFailures[uid] = (Runtime.JobFailures[uid] or 0) + 1
+        if Runtime.JobFailures[uid] >= 2 then
+            BlacklistUid(uid, BLACKLIST_FAIL)
+        end
+        Notify("Steal", "Could not take that egg (" .. lastOutcome .. ").", "error", 4)
+        SetStatus("Steal failed")
+    end)
+    if not ok then
+        warn("[RageHub:StealJob] " .. tostring(err))
+        SetStatus("Steal error (see console)")
+    end
+    ReleaseCamera()
+    Runtime.Busy = false
+    Runtime.JobMode = nil
+    Runtime.CooldownUntil = math.max(Runtime.CooldownUntil, os.clock() + JOB_COOLDOWN)
+end
+
+--==============================================================
+-- MANUAL ESCAPE  (Instant Steal + Help Friend share this: it
+-- triggers on the server's own FieldEggCarry event for you)
+--==============================================================
+
+function ManualEscapeJob(uid)
+    if Runtime.Busy or not Runtime.Alive then return end
+    local mode = FlagOn("HelpFriend") and "friend" or "safezone"
+    local token = NewToken()
+    Runtime.Busy = true
+    Runtime.JobMode = "manual"
+    local ok, err = pcall(function()
+        local rec = Runtime.Eggs[uid]
+        local nestPos = rec and RecordPos(rec)
+        local _, _, root = Char()
+        if not root then return end
+        if nestPos then FocusOn(nestPos) end
+        SetStatus(mode == "friend" and "Manual steal -> Forest (friend)" or "Manual steal -> SafeZone")
+        local destination = mode == "friend" and ForestMiddle() or SpawnPoint()
+        local checkFn = function(pos)
+            if Runtime.Carry.LostAt > 0 and not Runtime.Carry.Redeemed then
+                return true, "lost"
+            end
+            if nestPos and Runtime.CamFocus then
+                local flatFromNest = math.sqrt((pos.X - nestPos.X) ^ 2 + (pos.Z - nestPos.Z) ^ 2)
+                if flatFromNest > 40 then ReleaseCamera() end
+            end
+            return false
+        end
+        local okEsc, whyEsc = Glide(destination, token, { Check = checkFn })
+        if not okEsc then
+            if whyEsc == "lost" then
+                SetStatus("Recovering manual steal")
+                local recovered = WaitEggRecoverable(uid, token)
+                if recovered and (FlagOn("HelpFriend") or FlagOn("InstantSteal")) then
+                    AttemptSteal(recovered, token, mode, true, false)
                 end
             end
-
-            -- 2) treadmill: fly there, wear it, stay; come back if you leave
-            if AutoTreadmill then
-                local spot = GetTreadmillSpot()
-                local r = Root()
-                local away = spot and r and (r.Position - spot).Magnitude > 8
-                if (not Worn or away) and os.clock() >= TreadmillRetryAt then
-                    Busy = true
-                    local id = NewJob()
-                    local ok, result = pcall(GoToTreadmill, id)
-                    if not ok or result ~= true then TreadmillRetryAt = os.clock() + 6 end
-                    EndFlight()
-                    Busy = false
-                elseif AutoSteal then
-                    SetStatus("On treadmill, waiting for a matching egg")
-                end
-            elseif AutoSteal then
-                SetStatus("Scanning for matching eggs")
+            return
+        end
+        if mode == "friend" then
+            InvokeRemote(Net("RF", "EggWorld/AskFieldEggDrop"), { Reason = "PlayerRequest" })
+            Runtime.Carry = { IsCarrying = false, Uid = nil, Redeemed = false, LostAt = 0 }
+            local awayFlat = Vector3.new(SpawnPoint().X - destination.X, 0, SpawnPoint().Z - destination.Z)
+            if awayFlat.Magnitude > 1 then
+                Glide(destination + (awayFlat / awayFlat.Magnitude) * 30, token, { Timeout = 15 })
+            end
+            Notify("Help Friend", "Egg dropped at the Forest middle.", "success", 4)
+            SetStatus("Dropped for friend")
+        else
+            local verdict = AwaitVerdict(uid, token, VERDICT_WAIT)
+            if verdict == "redeemed" then
+                Notify("Steal", "Egg delivered to the SafeZone.", "success", 4)
+                SetStatus("Delivered")
+            elseif verdict == "lost" then
+                SetStatus("Egg lost")
+            else
+                SetStatus("Delivered (no verdict)")
             end
         end
     end)
+    if not ok then warn("[RageHub:ManualEscape] " .. tostring(err)) end
+    ReleaseCamera()
+    Runtime.Busy = false
+    Runtime.JobMode = nil
+    Runtime.CooldownUntil = math.max(Runtime.CooldownUntil, os.clock() + JOB_COOLDOWN)
 end
 
-local function CancelAll(reason)
-    Job += 1
-    EndFlight()
-    CamRelease()
-    Busy = false
-    SpeedOverride = false
-    local h = Hum()
-    if h and h.Parent then h.WalkSpeed = DesiredWalkSpeedSafe() end
-    if reason then SetStatus(reason) end
+local function HandleCarryEvent(payload)
+    if type(payload) ~= "table" then return end
+    local uid = payload.Uid
+    if payload.IsCarrying == true then
+        Runtime.Carry = { IsCarrying = true, Uid = uid, Redeemed = false, LostAt = 0 }
+        if not Runtime.Busy and Runtime.Alive and not Runtime.HopBusy then
+            if FlagOn("HelpFriend") or FlagOn("InstantSteal") then
+                task.spawn(ManualEscapeJob, uid)
+            end
+        end
+    else
+        if Runtime.Carry.Uid == nil or Runtime.Carry.Uid == uid then
+            Runtime.Carry.IsCarrying = false
+            -- a carry that ends while we are inside the SafeZone is a redeem,
+            -- not a loss - only mark it lost outside the zone
+            local _, _, rootNow = Char()
+            local inZone = rootNow ~= nil and InSafeZone(rootNow.Position)
+            if not Runtime.Carry.Redeemed and not inZone then
+                Runtime.Carry.LostAt = os.clock()
+            end
+        end
+    end
 end
 
 --==============================================================
--- TREADMILL (your own plot only, reached by flight)
+-- EGG PICKER  (not set = random; set = nearest match; unknown
+-- rarity only excluded when a rarity filter is on)
 --==============================================================
 
-local function GetOffTreadmill()
-    if not Worn then return end
-    local rf = Net("RF/Treadmill/AskDoff")
-    if rf and rf:IsA("RemoteFunction") then
-        pcall(function() rf:InvokeServer() end)
+local function PickEgg()
+    local raritySel = FlagSet("Rarities")
+    for rid in raritySel do
+        if not Runtime.KnownRarities[rid] then raritySel[rid] = nil end
     end
-    Worn = false
+    local biomeSel = FlagSet("Biomes")
+    local anyRarity = next(raritySel) == nil
+    local anyBiome = next(biomeSel) == nil
+    local region = ArmedRegion()
+    local candidates = {}
+    for uid, rec in Runtime.Eggs do
+        local state = rec.State
+        if (state == "Slot" or state == "Dropped") and not Blacklisted(uid) then
+            local rarity = RarityOf(rec.AssetCategory) or Runtime.RarityByUid[uid]
+            local rarityOk = anyRarity or (rarity ~= nil and raritySel[rarity] == true)
+            local biomeOk = anyBiome or (type(rec.AreaId) == "string" and biomeSel[rec.AreaId] == true)
+            if rarityOk and biomeOk then
+                local pos = RecordPos(rec)
+                if pos and not (region and PosInBox(pos, region.Min, region.Max)) then
+                    candidates[#candidates + 1] = { Rec = rec, Pos = pos }
+                end
+            end
+        end
+    end
+    if #candidates == 0 then return nil end
+    if anyRarity and anyBiome then
+        return candidates[math.random(1, #candidates)].Rec
+    end
+    local _, _, root = Char()
+    if not root then return candidates[1].Rec end
+    local best, bestDist = nil, math.huge
+    for _, cand in candidates do
+        local d = (cand.Pos - root.Position).Magnitude
+        if d < bestDist then
+            bestDist = d
+            best = cand.Rec
+        end
+    end
+    return best
 end
 
-GetOffTreadmillSafe = function()
-    pcall(GetOffTreadmill)
-end
-
-GoToTreadmill = function(id)
-    local spot = GetTreadmillSpot()
-    if not spot then
-        Notify("Auto Treadmill", "Could not find your plot/treadmill.", "error", 4)
-        return false
+local function StealEngineTick()
+    local mode = nil
+    if FlagOn("AutoHelpFriend") then
+        mode = "friend"
+    elseif FlagOn("AutoSteal") then
+        mode = "safezone"
     end
-
-    SetStatus("Flying to your treadmill")
-    if not FlyTo(spot, id, { HoverY = 3.1 }) then return false end
-    task.wait(0.4)
-    if Cancelled(id) then return false end
-
-    local rf = Net("RF/Treadmill/AskWearStill")
-    if not rf or not rf:IsA("RemoteFunction") then
-        Notify("Auto Treadmill", "RF/Treadmill/AskWearStill not found.", "error", 4)
-        return false
+    if not mode then return end
+    if Runtime.Busy or Runtime.HopBusy then return end
+    if Runtime.Carry.IsCarrying then
+        -- re-executed / left over while holding an egg: finish the delivery
+        local _, _, root = Char()
+        if root and not InSafeZone(root.Position) then
+            task.spawn(ManualEscapeJob, Runtime.Carry.Uid)
+        end
+        return
     end
-
-    local ok, result = pcall(function() return rf:InvokeServer() end)
-    if not ok then
-        Notify("Auto Treadmill", "AskWearStill failed: " .. tostring(result), "error", 4)
-        return false
+    if os.clock() < Runtime.CooldownUntil or os.clock() < Runtime.PauseUntil then return end
+    if not Char() then return end
+    if IsRagdolled() then return end
+    local rec = PickEgg()
+    if not rec then
+        SetStatus(mode == "friend" and "Auto Help: waiting for a matching egg" or "Auto Steal: waiting for a matching egg")
+        return
     end
-
-    Worn = true
-    SetStatus("On treadmill, waiting")
-    return true
+    task.spawn(StealJob, rec, mode)
 end
 
 --==============================================================
--- PLAYER FEATURES
+-- ANTI RAGDOLL  (local hygiene only: the 2.5 s server ragdoll can
+-- still happen - the real fix is not being hit. Never touches
+-- RigSync or any remote.)
 --==============================================================
 
-DesiredWalkSpeedSafe = function()
-    return SpeedAdjust and CFG.PlayerSpeed or 16
-end
-
-local function ApplySpeed()
-    local h = Hum()
-    if h and not SpeedOverride then h.WalkSpeed = DesiredWalkSpeedSafe() end
-end
-
--- Anti Ragdoll (also stops knockback/flinging): several layers, because the game's
--- bats, monsters and traps can push you in different ways.
-local BAD_MOVERS = {
-    "BodyVelocity", "BodyForce", "BodyAngularVelocity", "BodyThrust", "RocketPropulsion",
-    "LinearVelocity", "VectorForce", "AngularVelocity", "Torque", "BallSocketConstraint",
+local PHYSICS_CLASSES = {
+    BodyVelocity = true, LinearVelocity = true, VectorForce = true,
+    BodyAngularVelocity = true, BallSocketConstraint = true,
 }
 
-local function IsBadMover(inst)
-    for _, className in ipairs(BAD_MOVERS) do
-        if inst:IsA(className) then return true end
+local function AntiRagdollBaseline(char)
+    Runtime.MotorBase = WeakKeyed()
+    Runtime.KnownPhysics = WeakKeyed()
+    for _, node in char:GetDescendants() do
+        if node:IsA("Motor6D") then
+            Runtime.MotorBase[node] = node.Enabled
+        elseif PHYSICS_CLASSES[node.ClassName] then
+            Runtime.KnownPhysics[node] = true
+        end
+    end
+end
+
+local function SetAntiRagdoll(on)
+    Runtime.AntiRagdollOn = on
+    local char, hum = Char()
+    if on then
+        if char then AntiRagdollBaseline(char) end
+        if hum then
+            hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+        end
+    else
+        for part in Runtime.SavedCollide do
+            pcall(function() part.CanCollide = true end)
+        end
+        Runtime.SavedCollide = WeakKeyed()
+        if hum then
+            hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
+            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+        end
+    end
+end
+
+local function AntiRagdollTick()
+    if not Runtime.AntiRagdollOn then return end
+    local okAR, errAR = pcall(function()
+        local char, hum, root = Char()
+        if not char then return end
+        for _, node in char:GetDescendants() do
+            if node:IsA("Motor6D") then
+                local wasEnabled = Runtime.MotorBase[node]
+                if wasEnabled == nil then
+                    Runtime.MotorBase[node] = node.Enabled
+                elseif wasEnabled and not node.Enabled then
+                    node.Enabled = true
+                end
+            elseif PHYSICS_CLASSES[node.ClassName] and not Runtime.KnownPhysics[node] then
+                Runtime.KnownPhysics[node] = true
+                node:Destroy()
+            end
+        end
+        hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+        if hum.PlatformStand then hum.PlatformStand = false end
+        local ragEnd = char:GetAttribute("RagdollEndTime") or LocalPlayer:GetAttribute("RagdollEndTime")
+        if ragEnd and workspace:GetServerTimeNow() > ragEnd then
+            local state = hum:GetState()
+            if state == Enum.HumanoidStateType.Ragdoll or state == Enum.HumanoidStateType.FallingDown
+                or state == Enum.HumanoidStateType.Physics then
+                hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+            end
+        end
+        -- clamp absurd launch velocity when nothing of ours is flying
+        if not Runtime.Gliding then
+            local walk = math.max(hum.WalkSpeed or 16, 16)
+            local vel = root.AssemblyLinearVelocity
+            if vel.Magnitude > walk * 4 then
+                root.AssemblyLinearVelocity = vel.Unit * walk * 2
+            end
+        end
+        -- keep other players' parts from colliding with us (throttled)
+        if os.clock() - Runtime.LastOthersApply > 3 then
+            Runtime.LastOthersApply = os.clock()
+            for _, plr in Players:GetPlayers() do
+                if plr ~= LocalPlayer and plr.Character then
+                    for _, part in plr.Character:GetDescendants() do
+                        if part:IsA("BasePart") and part.CanCollide then
+                            Runtime.SavedCollide[part] = true
+                            part.CanCollide = false
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    if not okAR then warn("[RageHub:AntiRagdoll] " .. tostring(errAR)) end
+end
+
+--==============================================================
+-- AUTOMATION · shared helpers
+--==============================================================
+
+local function IsEquipped(uid)
+    local eq = Runtime.Profile.EquippedAssets
+    if type(eq) ~= "table" then return false end
+    if eq[uid] ~= nil then return true end
+    for _, item in eq do
+        if item == uid then return true end
+        if type(item) == "table" and (item.Uid == uid or item._id == uid or item.Id == uid) then
+            return true
+        end
     end
     return false
 end
 
-local RagdollAddedConn
+local function IsFavourite(entry)
+    if type(entry) ~= "table" then return false end
+    return entry.Favorite == true or entry.Favourite == true
+        or entry.IsFavorite == true or entry.IsFavourite == true
+        or entry.Locked == true
+end
 
-local function SetRagdollStates(h, enabled)
-    for _, st in ipairs({ Enum.HumanoidStateType.Ragdoll, Enum.HumanoidStateType.FallingDown }) do
-        pcall(function() h:SetStateEnabled(st, enabled) end)
+local function EntryCategory(entry)
+    if type(entry) ~= "table" then return nil end
+    return entry.AssetCategory or entry.Category
+end
+
+local TreadmillList = nil
+local function GetTreadmillConfigs()
+    if TreadmillList then return TreadmillList end
+    local okMod, module = pcall(function()
+        local dataFolder = ReplicatedStorage:WaitForChild("Data", 5)
+        local tm = dataFolder and dataFolder:WaitForChild("Treadmills", 5)
+        return tm and require(tm)
+    end)
+    if okMod and type(module) == "table" then
+        local raw = module.Configs or module
+        local list = {}
+        for key, cfg in raw do
+            if type(cfg) == "table" then
+                local id = cfg._id or cfg.Id or cfg.Name or (type(key) == "string" and key)
+                if type(id) == "string" then
+                    list[#list + 1] = { Id = id, Price = tonumber(cfg.Price) or math.huge }
+                end
+            end
+        end
+        table.sort(list, function(x, y) return x.Price < y.Price end)
+        if #list > 0 then
+            TreadmillList = list
+            return list
+        end
+    end
+    TreadmillList = { { Id = "Treadmill", Price = 0 }, { Id = "Sci-FiTreadmill", Price = 15000 } }
+    return TreadmillList
+end
+
+local TrailList = nil
+local function GetTrailConfigs()
+    if TrailList then return TrailList end
+    local okMod, module = pcall(function()
+        local dataFolder = ReplicatedStorage:WaitForChild("Data", 5)
+        local tr = dataFolder and dataFolder:WaitForChild("Trails", 5)
+        return tr and require(tr)
+    end)
+    if okMod and type(module) == "table" then
+        local raw = module.Configs or module
+        local list = {}
+        for key, cfg in raw do
+            if type(cfg) == "table" then
+                local id = cfg._id or cfg.Id or (type(key) == "string" and key)
+                if type(id) == "string" and cfg.DisplayInShop and tonumber(cfg.Price) then
+                    list[#list + 1] = { Id = id, Price = tonumber(cfg.Price) }
+                end
+            end
+        end
+        if #list > 0 then
+            table.sort(list, function(x, y) return x.Price > y.Price end)
+            TrailList = list
+            return list
+        end
+    end
+    TrailList = {}
+    return TrailList
+end
+
+--==============================================================
+-- AUTOMATION · Auto Sell  (RE/PetSatchel/SellSelection)
+--==============================================================
+
+local function AutoSellTick()
+    if not (FlagOn("AutoSellEggs") or FlagOn("AutoSellPets")) then return end
+    if Runtime.HopBusy then return end
+    local eggFilter = FlagSet("SellEggRarity")
+    local petFilter = FlagSet("SellPetRarity")
+    local sellEggs, sellPets = {}, {}
+    if FlagOn("AutoSellEggs") then
+        for uid, entry in Runtime.Profile.EggInventory do
+            if type(entry) == "table" and entry.Placement == nil and not entry.InFuse and not IsFavourite(entry) then
+                local rid = RarityOf(EntryCategory(entry))
+                if next(eggFilter) == nil or (rid and eggFilter[rid]) then
+                    sellEggs[#sellEggs + 1] = uid
+                end
+            end
+        end
+    end
+    if FlagOn("AutoSellPets") then
+        for uid, entry in Runtime.Profile.Inventory do
+            if type(entry) == "table" and not entry.InFuse and not IsFavourite(entry) and not IsEquipped(uid) then
+                local rid = RarityOf(EntryCategory(entry))
+                if next(petFilter) == nil or (rid and petFilter[rid]) then
+                    sellPets[#sellPets + 1] = uid
+                end
+            end
+        end
+    end
+    if #sellEggs == 0 and #sellPets == 0 then return end
+    FireRemote(Net("RE", "PetSatchel/SellSelection"), { Eggs = sellEggs, Assets = sellPets })
+end
+
+--==============================================================
+-- AUTOMATION · Auto Place Egg  (AskWearTool -> AskPlaceEgg)
+--==============================================================
+
+local function AutoPlaceTick()
+    if not FlagOn("AutoPlaceEgg") then return end
+    if Runtime.Busy or Runtime.Carry.IsCarrying or Runtime.HopBusy then return end
+    if os.clock() < Runtime.PlacePauseUntil then return end
+    if not GetMyPlot() then return end -- my plot not identifiable yet (sign not streamed)
+    local uids = {}
+    for uid, entry in Runtime.Profile.EggInventory do
+        if type(entry) == "table" and entry.Placement == nil and not entry.InFuse then
+            uids[#uids + 1] = uid
+        end
+    end
+    if #uids == 0 then return end
+    table.sort(uids)
+    local uid = uids[1]
+    local spotX, spotZ = FindPlacementSpot()
+    if not spotX then return end -- plot grid full
+    local wearOk, wearRes = FeatureInvoke("AutoPlaceEgg", Net("RF", "EggWorld/AskWearTool"), uid)
+    if not (wearOk and wearRes == true) then return end
+    task.wait(0.3)
+    local placeOk, placeRes = FeatureInvoke("AutoPlaceEgg", Net("RF", "EggWorld/AskPlaceEgg"), {
+        Uid = uid,
+        LocalCFrame = CFrame.new(spotX, -0.5, spotZ),
+    })
+    if not (placeOk and placeRes == true) then
+        pcall(function()
+            InvokeRemote(Net("RF", "EggWorld/AskDoffTool"), uid)
+        end)
+        Runtime.PlaceFalseStreak = Runtime.PlaceFalseStreak + 1
+        if Runtime.PlaceFalseStreak >= 3 then
+            Runtime.PlacePauseUntil = os.clock() + 60
+            Runtime.PlaceFalseStreak = 0
+            SetStatus("Auto Place: server refused - paused 60s")
+        end
+    else
+        Runtime.PlaceFalseStreak = 0
     end
 end
 
-local function CleanCharacter(c)
-    for _, d in ipairs(c:GetDescendants()) do
-        if IsBadMover(d) then
-            pcall(function() d:Destroy() end)
-        elseif d:IsA("Motor6D") and not d.Enabled then
-            pcall(function() d.Enabled = true end)
+--==============================================================
+-- AUTOMATION · Auto Hatch Egg  (AskHatch -> 6.2s -> AskFinishHatch)
+--==============================================================
+
+local function AutoHatchTick()
+    if not FlagOn("AutoHatch") then return end
+    if Runtime.HopBusy then return end
+    local now = os.clock()
+    local due = {}
+    for uid, finishAt in Runtime.HatchQueue do
+        if now >= finishAt then due[#due + 1] = uid end
+    end
+    for _, uid in due do
+        local finOk, finRes = FeatureInvoke("AutoHatch", Net("RF", "EggWorld/AskFinishHatch"), uid)
+        if finOk and finRes == true then
+            Runtime.HatchQueue[uid] = nil
+            Runtime.HatchFinFails[uid] = nil
+        else
+            local fails = (Runtime.HatchFinFails[uid] or 0) + 1
+            Runtime.HatchFinFails[uid] = fails
+            if fails >= 3 then
+                Runtime.HatchQueue[uid] = nil
+                Runtime.HatchRetryAt[uid] = os.clock() + 120
+            else
+                Runtime.HatchQueue[uid] = os.clock() + 2
+            end
+        end
+    end
+    if Runtime.LastHatchStart + 1 > now then return end
+    local starts = {}
+    for uid, entry in Runtime.Profile.EggInventory do
+        if type(entry) == "table" and entry.Placement ~= nil
+            and Runtime.HatchQueue[uid] == nil and Runtime.HatchStarted[uid] == nil
+            and now >= (Runtime.HatchRetryAt[uid] or 0) then
+            starts[#starts + 1] = uid
+        end
+    end
+    if #starts == 0 then return end
+    table.sort(starts)
+    local uid = starts[1]
+    Runtime.LastHatchStart = now
+    local hatchOk, hatchRes = FeatureInvoke("AutoHatch", Net("RF", "EggWorld/AskHatch"), uid)
+    if hatchOk and hatchRes == true then
+        Runtime.HatchStarted[uid] = true
+        Runtime.HatchQueue[uid] = now + HATCH_TIME
+    else
+        Runtime.HatchRetryAt[uid] = now + 30
+    end
+end
+
+--==============================================================
+-- AUTOMATION · Auto Catch Butterfly  (event-only, unverified
+-- payload: swings when in reach, chases only when idle)
+--==============================================================
+
+local function OnButterflyBloom(...)
+    if not FlagOn("AutoButterfly") then return end
+    local args = table.pack(...)
+    local flightId, bloomPos = nil, nil
+    for i = 1, args.n do
+        local arg = args[i]
+        if type(arg) == "string" or type(arg) == "number" then
+            if flightId == nil then flightId = arg end
+        elseif typeof(arg) == "Vector3" then
+            if bloomPos == nil then bloomPos = arg end
+        elseif type(arg) == "table" then
+            if flightId == nil then
+                flightId = arg.FlightId or arg.flightId or arg.Uid or arg.uid or arg.Id or arg._id
+            end
+            if bloomPos == nil then
+                if typeof(arg.Position) == "Vector3" then
+                    bloomPos = arg.Position
+                elseif typeof(arg.Pos) == "Vector3" then
+                    bloomPos = arg.Pos
+                end
+            end
+        end
+    end
+    if flightId == nil then
+        Runtime.Butterfly.Fails += 1
+        if Runtime.Butterfly.Fails >= 5 and Window then
+            local element = Window:GetElement("AutoButterfly")
+            if element and element.Get and element:Get() == true then
+                Notify("Auto Catch Butterfly", "Disabled: bloom carries no flight id. A RageDump during the event is needed.", "warning", 6)
+                pcall(function() element:Set(false) end)
+            end
+        end
+        return
+    end
+    Runtime.Butterfly.Fails = 0
+    if os.clock() - Runtime.Butterfly.LastSwing < Runtime.Butterfly.Cooldown then return end
+    local _, _, root = Char()
+    if not root then return end
+    if bloomPos and (bloomPos - root.Position).Magnitude > Runtime.Butterfly.NetReach then
+        -- out of reach: chase only while the steal engine has nothing to do
+        if (FlagOn("AutoSteal") or FlagOn("AutoHelpFriend")) or Runtime.Busy or Runtime.Carry.IsCarrying then
+            return
+        end
+        local token = NewToken()
+        Runtime.Busy = true
+        Runtime.JobMode = "butterfly"
+        task.spawn(function()
+            pcall(function()
+                Glide(bloomPos + Vector3.new(0, STOP_ABOVE, 0), token, { Timeout = 12 })
+                local _, _, rootAfter = Char()
+                if rootAfter and (bloomPos - rootAfter.Position).Magnitude <= Runtime.Butterfly.NetReach
+                    and os.clock() - Runtime.Butterfly.LastSwing >= Runtime.Butterfly.Cooldown then
+                    Runtime.Butterfly.LastSwing = os.clock()
+                    FeatureInvoke("AutoButterfly", Net("RF", "Butterflies/AskSwing"), flightId)
+                end
+            end)
+            Runtime.Busy = false
+            Runtime.JobMode = nil
+        end)
+        return
+    end
+    Runtime.Butterfly.LastSwing = os.clock()
+    FeatureInvoke("AutoButterfly", Net("RF", "Butterflies/AskSwing"), flightId)
+end
+
+local function TryConnectButterflies()
+    if Runtime.Butterfly.Connected then return end
+    local okCtl, controller = pcall(function()
+        local controllers = ReplicatedStorage:WaitForChild("Controllers", 5)
+        local gameCtl = controllers and controllers:WaitForChild("Game", 5)
+        local module = gameCtl and gameCtl:FindFirstChild("AdminAbuseClientController")
+        return module and require(module)
+    end)
+    if not okCtl or type(controller) ~= "table" then return end
+    local events = controller.Events
+    if type(events) ~= "table" then return end
+    local bloom = events.ButterflyBloom
+    if typeof(bloom) == "Instance" and bloom:IsA("BindableEvent") then
+        Track(bloom.Event:Connect(OnButterflyBloom))
+        Runtime.Butterfly.Connected = true
+    elseif type(bloom) == "table" and type(bloom.Connect) == "function" then
+        Track(bloom:Connect(OnButterflyBloom))
+        Runtime.Butterfly.Connected = true
+    end
+    local okCfg, cfg = pcall(function()
+        local dataFolder = ReplicatedStorage:WaitForChild("Data", 5)
+        local bf = dataFolder and dataFolder:FindFirstChild("Butterflies")
+        return bf and require(bf)
+    end)
+    if okCfg and type(cfg) == "table" then
+        local realCfg = cfg.Configs or cfg.Config or cfg
+        Runtime.Butterfly.NetReach = tonumber(realCfg.NetReach) or Runtime.Butterfly.NetReach
+        Runtime.Butterfly.Cooldown = tonumber(realCfg.SwingCooldownSeconds) or Runtime.Butterfly.Cooldown
+    end
+end
+
+--==============================================================
+-- AUTOMATION · Best Pet / Claim / Upgrade / Buy Trail
+--==============================================================
+
+local function AutoBestPetTick()
+    if not FlagOn("AutoBestPet") then return end
+    if Runtime.HopBusy then return end
+    local inv = Runtime.Profile.Inventory
+    if type(inv) ~= "table" or next(inv) == nil then return end
+    local sig = {}
+    for uid in inv do sig[#sig + 1] = uid end
+    table.sort(sig)
+    local signature = table.concat(sig, ",")
+    if signature == Runtime.LastPetSig then return end
+    local okWear = FeatureInvoke("AutoBestPet", Net("RF", "Haul/WearBest"))
+    if okWear then Runtime.LastPetSig = signature end
+end
+
+local function AutoClaimTick()
+    if not FlagOn("AutoClaim") then return end
+    if Runtime.HopBusy then return end
+    FeatureInvoke("AutoClaim", Net("RF", "AwayEarnings/AskCollect"), { Kind = "Claim" })
+    FeatureInvoke("AutoClaim", Net("RF", "Codex/AskRedeemAll"))
+end
+
+local function AutoUpgradeTreadmillTick()
+    if not FlagOn("AutoUpgradeTreadmill") then return end
+    if Runtime.HopBusy then return end
+    local money = Runtime.Profile.Money
+    if type(money) ~= "number" then return end -- unknown until the first ProfileDelta
+    local configs = GetTreadmillConfigs()
+    if #configs < 2 then return end
+    local currentIndex = 1
+    for i, cfg in configs do
+        if cfg.Id == Runtime.Treadmill.TierId then
+            currentIndex = i
+            break
+        end
+    end
+    local nextCfg = configs[currentIndex + 1]
+    if not nextCfg then return end -- top tier owned
+    if money < nextCfg.Price then return end
+    local okRaise, resRaise = FeatureInvoke("AutoUpgradeTreadmill", Net("RF", "Treadmill/AskTierRaise"), nextCfg.Id)
+    if okRaise and resRaise == true then
+        Runtime.Treadmill.TierId = nextCfg.Id
+        SetStatus(("Treadmill upgraded: %s"):format(nextCfg.Id))
+    end
+end
+
+local function AutoBuyTrailTick()
+    if not FlagOn("AutoBuyTrail") then return end
+    if Runtime.HopBusy then return end
+    local money = Runtime.Profile.Money
+    if type(money) ~= "number" then return end
+    local trails = GetTrailConfigs()
+    for _, trail in trails do -- most expensive first
+        if not Runtime.TrailAttempted[trail.Id] and money >= trail.Price then
+            local okBuy, resBuy = FeatureInvoke("AutoBuyTrail", Net("RF", "Trailwear/AskPurchase"), trail.Id)
+            if okBuy and resBuy == true then
+                Runtime.TrailAttempted[trail.Id] = true
+                pcall(function()
+                    InvokeRemote(Net("RF", "Trailwear/AskChoose"), trail.Id) -- [UNVERIFIED shape]
+                end)
+                SetStatus(("Trail bought: %s"):format(trail.Id))
+            else
+                local falseCount = (Runtime.TrailFalseCount[trail.Id] or 0) + 1
+                Runtime.TrailFalseCount[trail.Id] = falseCount
+                if falseCount >= 3 then
+                    Runtime.TrailAttempted[trail.Id] = true -- owned or unavailable: stop trying
+                end
+            end
+            return -- one attempt per pass
         end
     end
 end
 
-local function HookRagdoll()
-    if RagdollAddedConn then RagdollAddedConn:Disconnect(); RagdollAddedConn = nil end
-    local c = Char()
-    if not c then return end
-    local h = Hum()
-    if h then SetRagdollStates(h, false) end
-    CleanCharacter(c)
-    RagdollAddedConn = c.DescendantAdded:Connect(function(d)
-        if AntiRagdoll and IsBadMover(d) then
-            task.defer(function() pcall(function() d:Destroy() end) end)
-        end
+--==============================================================
+-- MISC · Anti AFK  (virtual input; never fires Telemetry/IdleRescue)
+--==============================================================
+
+local function SetupAntiAfk()
+    Track(LocalPlayer.Idled:Connect(function()
+        pcall(function()
+            local virtualUser = game:GetService("VirtualUser")
+            virtualUser:CaptureController()
+            virtualUser:ClickButton1(Vector2.new())
+        end)
+    end))
+end
+
+local function AntiAfkTick()
+    if not FlagOn("AntiAfk") then return end
+    pcall(function()
+        local uis = game:GetService("UserInputService")
+        local virtualInput = game:GetService("VirtualInputManager")
+        local loc = uis:GetMouseLocation()
+        virtualInput:SendMouseMoveEvent(loc.X + math.random(-4, 4), loc.Y + math.random(-4, 4))
     end)
 end
 
-local function SetAntiRagdoll(on)
-    AntiRagdoll = on
-    if on then
-        HookRagdoll()
-    else
-        if RagdollAddedConn then RagdollAddedConn:Disconnect(); RagdollAddedConn = nil end
-        local h = Hum()
-        if h then SetRagdollStates(h, true) end
-    end
-end
-
-Track(RunService.Heartbeat:Connect(function()
-    -- everything here is a no-op until you switch the matching toggle on
-    if CamLocked and CamCFrame then
-        local cam = workspace.CurrentCamera
-        if cam then
-            if cam.CameraType ~= Enum.CameraType.Scriptable then cam.CameraType = Enum.CameraType.Scriptable end
-            cam.CFrame = CamCFrame
-        end
-    end
-
-    if SpeedAdjust and not SpeedOverride then
-        local h = Hum()
-        if h and h.WalkSpeed ~= CFG.PlayerSpeed then h.WalkSpeed = CFG.PlayerSpeed end
-    end
-
-    if AntiRagdoll then
-        local h, r = Hum(), Root()
-        if h and r then
-            local st = h:GetState()
-            if st == Enum.HumanoidStateType.Ragdoll or st == Enum.HumanoidStateType.FallingDown
-                or st == Enum.HumanoidStateType.Physics then
-                h:ChangeState(Enum.HumanoidStateType.GettingUp)
-            end
-            if h.PlatformStand then h.PlatformStand = false end
-
-            -- the script's own flights are skipped
-            if not Busy and not Flying then
-                local v = r.AssemblyLinearVelocity
-                local limit = math.max(150, h.WalkSpeed * 1.5)
-                local flat = Vector3.new(v.X, 0, v.Z)
-                if flat.Magnitude > limit then
-                    local dir = flat.Unit
-                    r.AssemblyLinearVelocity = Vector3.new(dir.X * limit, math.min(v.Y, 60), dir.Z * limit)
-                elseif v.Y > 90 then
-                    r.AssemblyLinearVelocity = Vector3.new(v.X, 0, v.Z)
-                end
-                if r.AssemblyAngularVelocity.Magnitude > 25 then
-                    r.AssemblyAngularVelocity = Vector3.zero
-                end
-            end
-        end
-    end
-end))
-
-Track(RunService.Stepped:Connect(function()
-    local noclipNow = Noclip or (FlightNoclip and Flying)
-    if noclipNow then
-        local c = Char()
-        if c then
-            for _, part in ipairs(c:GetChildren()) do
-                if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end
-            end
-        end
-    elseif not Noclip and not Flying then
-        -- restore collisions once after a flight ends
-        local c = Char()
-        if c and c:GetAttribute("__RHRestoreCol") then
-            c:SetAttribute("__RHRestoreCol", nil)
-            for _, part in ipairs(c:GetChildren()) do
-                if part:IsA("BasePart") and not part:IsA("HumanoidRootPart") then
-                    pcall(function() part.CanCollide = true end)
-                end
-            end
-        end
-    end
-    if Flying then
-        local c = Char()
-        if c and not c:GetAttribute("__RHRestoreCol") then
-            c:SetAttribute("__RHRestoreCol", true)
-        end
-    end
-
-    -- other players can't push you: their bodies stop colliding with yours
-    if AntiRagdoll then
-        for _, plr in ipairs(Players:GetPlayers()) do
-            if plr ~= LocalPlayer and plr.Character then
-                for _, part in ipairs(plr.Character:GetChildren()) do
-                    if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end
-                end
-            end
-        end
-    end
-end))
-
-Track(UserInputService.JumpRequest:Connect(function()
-    if InfiniteJump then
-        local h = Hum()
-        if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
-    end
-end))
-
-Track(LocalPlayer.CharacterAdded:Connect(function()
-    CamRelease()
-    Worn = false
-    Carrying = false
-    Busy = false
-    Flying = false
-    Job += 1
-    SpeedOverride = false
-    task.wait(1)
-    ApplySpeed()
-    if AntiRagdoll then HookRagdoll() end
-end))
-
--- Anti AFK (connected only while its toggle is on)
-local AntiAfkConn
-local function SetAntiAfk(on)
-    if on and not AntiAfkConn then
-        AntiAfkConn = LocalPlayer.Idled:Connect(function()
-            pcall(function()
-                local vu = game:GetService("VirtualUser")
-                vu:CaptureController()
-                vu:ClickButton2(Vector2.new())
-            end)
-        end)
-    elseif not on and AntiAfkConn then
-        AntiAfkConn:Disconnect()
-        AntiAfkConn = nil
-    end
-end
-
--- Auto Execute: re-runs this script (from your hosted URL) in the next server
-local AutoExecuteOn = false
-local QueuedThisSession = false
-local OnTeleportConn, TeleportFailConn
+--==============================================================
+-- MISC · Auto Execute / Reconnect
+--==============================================================
 
 local function QueueAutoExecute()
-    if QueuedThisSession then return true end
-    local queue = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
-    if not queue then
-        Notify("Auto Execute", "Your executor has no queue_on_teleport.", "error", 4)
-        return false
+    if Runtime.AutoExecuteQueued then return end
+    if not FlagOn("AutoExecute") then return end
+    local src = ('loadstring(game:HttpGet("%s"))()'):format(AUTO_EXECUTE_URL)
+    local okQueue = pcall(function() queue_on_teleport(src) end)
+    Runtime.AutoExecuteQueued = true
+    if not okQueue then
+        warn("[RageHub] queue_on_teleport is not available on this executor")
     end
-    local code = string.format(
-        "if not game:IsLoaded() then game.Loaded:Wait() end task.wait(2) loadstring(game:HttpGet(%q))()",
-        AUTO_EXECUTE_URL
-    )
-    local ok = pcall(queue, code)
-    if ok then QueuedThisSession = true end
-    return ok
 end
 
-local function SetAutoExecute(on)
-    AutoExecuteOn = on
-    if on then
-        if QueueAutoExecute() then Notify("Auto Execute", "Queued for the next teleport / rejoin.", "success", 3) end
-        if not OnTeleportConn then
-            OnTeleportConn = LocalPlayer.OnTeleport:Connect(function(state)
-                if state == Enum.TeleportState.Started or state == Enum.TeleportState.InProgress then
-                    QueuedThisSession = true
-                end
+local function Rejoin()
+    if Runtime.Rejoining or not Runtime.Alive then return end
+    Runtime.Rejoining = true
+    QueueAutoExecute()
+    task.spawn(function()
+        for attempt = 1, RECONNECT_MAX do
+            if not Runtime.Alive then break end
+            Runtime.LastTeleport = { PlaceId = game.PlaceId, JobId = nil }
+            local okTp = pcall(function()
+                TeleportService:Teleport(game.PlaceId, LocalPlayer)
             end)
+            if okTp then break end
+            task.wait(attempt * 2)
         end
-        if not TeleportFailConn then
-            TeleportFailConn = TeleportService.TeleportInitFailed:Connect(function()
-                QueuedThisSession = false
-                if AutoExecuteOn then pcall(QueueAutoExecute) end
-            end)
-        end
-    else
-        if OnTeleportConn then OnTeleportConn:Disconnect(); OnTeleportConn = nil end
-        if TeleportFailConn then TeleportFailConn:Disconnect(); TeleportFailConn = nil end
-    end
+        Runtime.Rejoining = false
+    end)
 end
 
--- Auto Reconnect (connected only while its toggle is on)
-local ReconnectConns = {}
-local Rejoining = false
-
-local function TryRejoin()
-    if Unloaded or Rejoining then return end
-    Rejoining = true
-    for attempt = 1, 8 do
-        if Unloaded then break end
-        task.wait(attempt == 1 and 2 or 5)
-        if AutoExecuteOn then pcall(QueueAutoExecute) end
-        pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
-        task.wait(10)   -- still here? try again
-    end
-    Rejoining = false
-end
-
-local function SetAutoReconnect(on)
-    for _, c in ipairs(ReconnectConns) do pcall(function() c:Disconnect() end) end
-    table.clear(ReconnectConns)
-    if not on then return end
-
-    table.insert(ReconnectConns, GuiService.ErrorMessageChanged:Connect(function(msg)
-        if msg and msg ~= "" then task.spawn(TryRejoin) end
+local function SetupReconnect()
+    Track(GuiService.ErrorMessageChanged:Connect(function()
+        if not FlagOn("AutoReconnect") then return end
+        if GuiService:GetErrorMessage() == "" then return end
+        task.wait(1)
+        Rejoin()
     end))
-
-    pcall(function()
-        local overlay = game:GetService("CoreGui").RobloxPromptGui.promptOverlay
-        table.insert(ReconnectConns, overlay.ChildAdded:Connect(function(child)
-            if child.Name == "ErrorPrompt" then task.spawn(TryRejoin) end
-        end))
-    end)
-
-    pcall(function()
-        local client = game:GetService("NetworkClient")
-        table.insert(ReconnectConns, client.ChildRemoved:Connect(function()
-            task.spawn(TryRejoin)
-        end))
-    end)
-
-    table.insert(ReconnectConns, TeleportService.TeleportInitFailed:Connect(function()
-        task.spawn(TryRejoin)
+    local networkClient = game:GetService("NetworkClient")
+    Track(networkClient.ChildRemoved:Connect(function()
+        if not FlagOn("AutoReconnect") then return end
+        task.wait(1)
+        Rejoin()
+    end))
+    Track(TeleportService.TeleportInitFailed:Connect(function()
+        if not FlagOn("AutoReconnect") then return end
+        if Runtime.ReconnectRetries >= RECONNECT_MAX then return end
+        Runtime.ReconnectRetries += 1
+        task.wait(math.min(2 ^ Runtime.ReconnectRetries, 20))
+        if not Runtime.Alive then return end
+        local last = Runtime.LastTeleport
+        pcall(function()
+            if last and last.JobId then
+                TeleportService:TeleportToPlaceInstance(last.PlaceId, last.JobId, LocalPlayer)
+            else
+                TeleportService:Teleport(game.PlaceId, LocalPlayer)
+            end
+        end)
     end))
 end
 
 --==============================================================
--- EXPERIMENTAL: AUTO PLACE + AUTO HATCH (game's own remotes)
---   AskPlaceEgg      { Uid, LocalCFrame }   -> true
---   AskHatch         (uid)                  -> true, nil, nil
---   AskFinishHatch   (uid)                  -> true, nil, grantedPetUid
---   (shapes taken straight from your remote spy log)
+-- MISC · Hop to Lowest Server  (6 samples, keep servers present in
+-- every sample, lowest player count, <= max-2 players)
 --==============================================================
 
-local PLACE_SPOTS = {
-    Vector3.new(-3, -0.5, -7), Vector3.new(3, -0.5, -7), Vector3.new(0, -0.5, -12),
-    Vector3.new(-5, -0.5, -13), Vector3.new(5, -0.5, -13), Vector3.new(-6, -0.5, -8),
-    Vector3.new(6, -0.5, -8), Vector3.new(0, -0.5, -17), Vector3.new(-4, -0.5, -18),
-    Vector3.new(4, -0.5, -18), Vector3.new(-7, -0.5, -16), Vector3.new(7, -0.5, -16),
-    Vector3.new(-2, -0.5, -22), Vector3.new(2, -0.5, -22),
-}
-
-local function AskPlaceEgg(uid, offset)
-    local rf = Net("RF/EggWorld/AskPlaceEgg")
-    if not rf or not rf:IsA("RemoteFunction") then return false end
-    local ok, a = pcall(function() return rf:InvokeServer({ Uid = uid, LocalCFrame = CFrame.new(offset) }) end)
-    return ok and a == true
+local function FetchServerPage()
+    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100"):format(game.PlaceId)
+    local ok, body = pcall(function() return game:HttpGet(url) end)
+    if not ok then return nil end
+    local okDecode, data = pcall(function() return HttpService:JSONDecode(body) end)
+    if not okDecode or type(data) ~= "table" or type(data.data) ~= "table" then return nil end
+    return data.data
 end
 
-local function BeginHatchRemote(uid)
-    local rf = Net("RF/EggWorld/AskHatch")
-    if not rf or not rf:IsA("RemoteFunction") then return false end
-    local ok, a = pcall(function() return rf:InvokeServer(uid) end)
-    return ok and a == true
-end
-
-local function FinishHatchRemote(uid)
-    local rf = Net("RF/EggWorld/AskFinishHatch")
-    if not rf or not rf:IsA("RemoteFunction") then return false, nil end
-    local ok, a, b = pcall(function() return rf:InvokeServer(uid) end)
-    if ok and a == true then
-        return true, (type(b) == "string" and b or nil)
-    end
-    return false, nil
-end
-
-local PlaceCooldown = {}   -- uid -> os.clock() until which we skip
-local HatchCooldown = {}
-local HatchBusy = {}
-
-local function AutoPlacePass()
-    local placed = 0
-    for uid, rec in pairs(MyEggRecords) do
-        if type(rec) == "table" and rec.Placement == nil and (PlaceCooldown[uid] or 0) < os.clock() then
-            local done = false
-            for _, off in ipairs(PLACE_SPOTS) do
-                if AskPlaceEgg(uid, off) then
-                    done = true
-                    placed += 1
-                    Log("Placed egg " .. tostring(rec.AssetCategory) .. " into the pen.")
-                    break
+local function PickLowestServer()
+    local common = nil
+    local samples = 0
+    local deadline = os.clock() + 20
+    while samples < 6 and os.clock() < deadline do
+        local page = FetchServerPage()
+        if page then
+            samples += 1
+            local ids = {}
+            for _, server in page do
+                if type(server) == "table" and type(server.id) == "string" then
+                    ids[server.id] = server
                 end
+            end
+            if common == nil then
+                common = ids
+            else
+                local kept = {}
+                for id, server in common do
+                    if ids[id] then kept[id] = server end
+                end
+                common = kept
+            end
+            if samples < 6 then task.wait(0.8) end
+        else
+            task.wait(1.2) -- HTTP 429 / failure: back off, don't count the sample
+        end
+    end
+    if not common then return nil end
+    local best = nil
+    for id, server in common do
+        local playing = tonumber(server.playing) or 0
+        local maxP = tonumber(server.maxPlayers) or 0
+        if id ~= game.JobId and maxP > 0 and playing < maxP - 1 then
+            if not best or playing < (tonumber(best.playing) or 0) then
+                best = server
+            end
+        end
+    end
+    return best
+end
+
+local function HopToLowest()
+    if Runtime.HopBusy then return end
+    Runtime.HopBusy = true
+    task.spawn(function()
+        local okHop, hopErr = pcall(function()
+            local chosen = nil
+            for round = 1, 2 do
+                SetStatus(("Hop: sampling servers (%d/2)"):format(round))
+                chosen = PickLowestServer()
+                if chosen then break end
+                if round == 1 then task.wait(1) end
+            end
+            if not chosen then
+                Notify("Hop", "No lower server found - staying here.", "info", 4)
+                SetStatus("Hop: no lower server")
+                return
+            end
+            QueueAutoExecute()
+            Runtime.LastTeleport = { PlaceId = game.PlaceId, JobId = chosen.id }
+            local okTp = pcall(function()
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, chosen.id, LocalPlayer)
+            end)
+            if not okTp then
+                Notify("Hop", "Teleport failed - staying here.", "error", 4)
+                SetStatus("Hop: teleport failed")
+            end
+        end)
+        if not okHop then
+            warn("[RageHub:Hop] " .. tostring(hopErr))
+            Notify("Hop", "Sampling failed - staying here.", "error", 4)
+        end
+        Runtime.HopBusy = false
+    end)
+end
+
+--==============================================================
+-- UNLOAD
+--==============================================================
+
+local function UnloadAll()
+    if not Runtime.Alive then return end
+    Runtime.Alive = false
+    NewToken()
+    Runtime.Busy = false
+    Runtime.Gliding = false
+    pcall(ReleaseCamera)
+    pcall(function() LocalPlayer.ReplicationFocus = nil end)
+    pcall(function() SetAntiRagdoll(false) end)
+    for _, conn in Runtime.Conns do
+        pcall(function() conn:Disconnect() end)
+    end
+    Runtime.Conns = {}
+    if Window then
+        pcall(function() Window:Destroy() end)
+    end
+end
+
+--==============================================================
+-- CHARACTER LIFECYCLE  (loops keep running; only state resets)
+--==============================================================
+
+local function OnCharacterAdded(char)
+    task.spawn(function()
+        local okChar, errChar = pcall(function()
+            ResetRuntime()
+            local deadline = os.clock() + 10
+            while os.clock() < deadline do
+                if char:FindFirstChild("HumanoidRootPart") and char:FindFirstChildOfClass("Humanoid") then break end
                 task.wait(0.1)
             end
-            if not done then
-                PlaceCooldown[uid] = os.clock() + 60
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then
+                Track(hum.Died:Connect(function()
+                    ResetRuntime()
+                    SetStatus("Died - recovering")
+                end))
             end
-        end
-    end
-    return placed
-end
-
-local function AutoHatchPass()
-    for uid, rec in pairs(MyEggRecords) do
-        if type(rec) == "table" and rec.Placement ~= nil and not HatchBusy[uid]
-            and (HatchCooldown[uid] or 0) < os.clock() then
-            HatchBusy[uid] = true
-            task.spawn(function()
-                local ok = BeginHatchRemote(uid)
-                if ok then
-                    task.wait(6.5)
-                    local done, petUid = FinishHatchRemote(uid)
-                    if done then
-                        Log("Hatched " .. tostring(rec.AssetCategory) .. (petUid and (" (pet " .. petUid .. ")") or ""))
-                        Notify("Auto Hatch", "Hatched: " .. tostring(rec.AssetCategory), "success", 4)
-                        HatchCooldown[uid] = os.clock() + 300
-                    else
-                        HatchCooldown[uid] = os.clock() + 60
-                    end
-                else
-                    HatchCooldown[uid] = os.clock() + CFG.HatchInterval
-                end
-                HatchBusy[uid] = nil
-            end)
-        end
-    end
-end
-
-local MaintLoopStarted = false
-local LastEquip, LastClaim, LastPlace, LastHatch = 0, 0, 0, 0
-
-local function DoEquipBest()
-    local rf = Net("RF/Haul/WearBest")
-    if not rf or not rf:IsA("RemoteFunction") then return false, "remote not found" end
-    return pcall(function() return rf:InvokeServer() end)
-end
-
-local function DoClaimAway()
-    local rf = Net("RF/AwayEarnings/AskCollect")
-    if not rf or not rf:IsA("RemoteFunction") then return false, "remote not found" end
-    return pcall(function() return rf:InvokeServer({ Kind = "Claim" }) end)
-end
-
-local function StartMaintLoop()
-    if MaintLoopStarted then return end
-    MaintLoopStarted = true
-    task.spawn(function()
-        while not Unloaded do
-            task.wait(1)
-            if Unloaded then break end
-            if AutoEquipBest and os.clock() - LastEquip >= CFG.EquipInterval then
-                LastEquip = os.clock()
-                pcall(DoEquipBest)
+            if Runtime.AntiRagdollOn then
+                AntiRagdollBaseline(char)
             end
-            if AutoClaimAway and os.clock() - LastClaim >= CFG.ClaimInterval then
-                LastClaim = os.clock()
-                pcall(DoClaimAway)
-            end
-            if AutoPlaceEggs and os.clock() - LastPlace >= CFG.PlaceInterval then
-                LastPlace = os.clock()
-                pcall(AutoPlacePass)
-            end
-            if AutoHatchEggs and os.clock() - LastHatch >= CFG.HatchInterval then
-                LastHatch = os.clock()
-                pcall(AutoHatchPass)
-            end
-        end
+            RefreshSnapshot()
+            SetStatus("Respawned - resuming")
+        end)
+        if not okChar then warn("[RageHub:Char] " .. tostring(errChar)) end
     end)
 end
 
 --==============================================================
--- WINDOW
+-- AUTO TREADMILL  (remote-only: the server relocates you onto
+-- YOUR treadmill; truth comes from RenderStateShifted)
+--==============================================================
+
+local function AutoTreadmillTick()
+    if not FlagOn("AutoTreadmill") then return end
+    if Runtime.Busy or Runtime.Carry.IsCarrying or Runtime.HopBusy then return end
+    local tm = Runtime.Treadmill
+    if tm.Worn then return end
+    if os.clock() - (tm.UnwornAt or 0) < TREADMILL_UNWORN then return end
+    if os.clock() - tm.LastWear < TREADMILL_GAP then return end
+    if not Char() then return end
+    tm.LastWear = os.clock()
+    FeatureInvoke("AutoTreadmill", Net("RF", "Treadmill/AskWearStill"))
+end
+
+--==============================================================
+-- EVENT WIRING
+--==============================================================
+
+local function ConnectRemote(kind, path, handler)
+    local node = Net(kind, path)
+    if not node then
+        warn("[RageHub] remote missing: " .. kind .. "/" .. path)
+        return
+    end
+    Track(node.Event:Connect(function(...)
+        local okEv, errEv = pcall(handler, ...)
+        if not okEv then warn("[RageHub:" .. path .. "] " .. tostring(errEv)) end
+    end))
+end
+
+local function OnBatchShifted(batch)
+    if type(batch) ~= "table" then return end
+    if type(batch.Records) == "table" then
+        ForEachRecord(batch.Records, ApplyRecord)
+    else
+        ForEachRecord(batch, ApplyRecord)
+    end
+end
+
+local function OnEggGone(uid)
+    if type(uid) == "string" then
+        Runtime.Eggs[uid] = nil
+    elseif type(uid) == "table" and type(uid.Uid) == "string" then
+        Runtime.Eggs[uid.Uid] = nil
+    end
+end
+
+local function OnRedeemVerdict(payload)
+    if type(payload) ~= "table" then return end
+    local uid = payload.Uid or payload.EggUid
+    if type(uid) == "string" then
+        Runtime.LastVerdictUid = uid
+    end
+    if Runtime.Carry.Uid == nil or Runtime.Carry.Uid == uid then
+        Runtime.Carry.Redeemed = true
+        Runtime.Carry.IsCarrying = false
+    end
+end
+
+local function OnRaritiesShown(payload)
+    if type(payload) ~= "table" or type(payload.RareSpawns) ~= "table" then return end
+    for _, spawn in payload.RareSpawns do
+        if type(spawn) == "table" and type(spawn.EggUid) == "string" then
+            Runtime.RarityByUid[spawn.EggUid] = spawn.RarityId
+        end
+    end
+end
+
+local function OnOwnerShifted(payload)
+    if type(payload) ~= "table" or type(payload.Records) ~= "table" then return end
+    for key, value in payload.Records do
+        if type(key) == "string" then
+            Runtime.Eggs[key] = nil
+        elseif type(value) == "table" and type(value.Uid) == "string" then
+            Runtime.Eggs[value.Uid] = nil
+        end
+    end
+end
+
+local function OnHomesteadState(payload)
+    if type(payload) ~= "table" then return end
+    local function accept(entry)
+        if type(entry) == "table" and entry.UserId == LocalPlayer.UserId and entry.Slot ~= nil then
+            Runtime.MyPlotSlot = tonumber(entry.Slot) or entry.Slot
+        end
+    end
+    accept(payload)
+    for _, entry in payload do
+        accept(entry)
+    end
+end
+
+local function ConnectGameEvents()
+    ConnectRemote("RE", "EggWorld/FieldEggShifted", ApplyRecord)
+    ConnectRemote("RE", "EggWorld/FieldEggBatchShifted", OnBatchShifted)
+    ConnectRemote("RE", "EggWorld/FieldEggGone", OnEggGone)
+    ConnectRemote("RE", "EggWorld/FieldEggCarry", HandleCarryEvent)
+    ConnectRemote("RE", "EggWorld/FieldEggRedeemVerdict", OnRedeemVerdict)
+    ConnectRemote("RE", "EggWorld/FieldEggRaritiesShown", OnRaritiesShown)
+    ConnectRemote("RE", "EggWorld/OwnerShifted", OnOwnerShifted)
+    ConnectRemote("RE", "ProfileMirror/ProfileDelta", function(delta, _, player)
+        local who = player
+        if typeof(who) ~= "Instance" or not who:IsA("Player") then who = LocalPlayer end
+        OnProfileDelta(who, delta)
+    end)
+    ConnectRemote("RE", "Treadmill/RenderStateShifted", function(player, worn)
+        if typeof(player) == "Instance" and player:IsA("Player") and player == LocalPlayer then
+            Runtime.Treadmill.Worn = worn == true
+            if not worn then
+                Runtime.Treadmill.UnwornAt = os.clock()
+            end
+        end
+    end)
+    ConnectRemote("RE", "Treadmill/AssignedBeltShifted", function(treadmillId)
+        if type(treadmillId) == "string" then
+            Runtime.Treadmill.TierId = treadmillId
+        end
+    end)
+    ConnectRemote("RE", "Homestead/StateShifted", OnHomesteadState)
+end
+
+--==============================================================
+-- WINDOW  (built last: every callback above is already in scope)
 --==============================================================
 
 Window = RageHub:CreateWindow({
     Name = "Rage Hub",
-    Subtitle = "Steal An Egg · v2 Flight",
+    Subtitle = "Steal An Egg - " .. VERSION,
     Theme = "Rage",
     Features = { Notifications = true },
     ConfigFolder = "RageHub/StealAnEgg",
-    AutoSave = "autosave",
+    AutoSave = Prefs.AutoSave and "autosave" or nil,
     Splash = true,
-    OnUnload = function()
-        Unloaded = true
-        CamRelease()
-        EndFlight()
-        InstantSteal, AutoSteal, AutoTreadmill = false, false, false
-        SpeedAdjust, InfiniteJump, Noclip = false, false, false
-        SetAntiRagdoll(false)
-        EggAlert, AutoEquipBest, AutoClaimAway = false, false, false
-        AutoPlaceEggs, AutoHatchEggs = false, false
-        Job += 1
-        SpeedOverride = false
-        RestoreHolds()
-        SetAntiAfk(false)
-        SetAutoReconnect(false)
-        SetAutoExecute(false)
-        for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
-        table.clear(Connections)
-        local c = Char()
-        if c then
-            for _, part in ipairs(c:GetChildren()) do
-                if part:IsA("BasePart") and not part:IsA("HumanoidRootPart") then
-                    pcall(function() part.CanCollide = true end)
-                end
-            end
-        end
-        local h = Hum()
-        if h and h.Parent then h.WalkSpeed = 16 end
-    end,
+    OnUnload = UnloadAll,
 })
 
--- only one copy at a time (re-executing replaces the old one)
-local Env = (getgenv and getgenv()) or _G
-if Env.__RageHubStealAnEgg and Env.__RageHubStealAnEgg ~= Window then
-    pcall(function() Env.__RageHubStealAnEgg:Destroy() end)
+do
+    local env = nil
+    pcall(function() env = getgenv() end)
+    if type(env) ~= "table" then pcall(function() env = shared end) end
+    if type(env) == "table" then
+        if env.__RageHubStealAnEgg and env.__RageHubStealAnEgg ~= Window then
+            pcall(function() env.__RageHubStealAnEgg:Destroy() end)
+        end
+        env.__RageHubStealAnEgg = Window
+    end
 end
-Env.__RageHubStealAnEgg = Window
+
+local function CancelMode(...)
+    local modes = { ... }
+    for _, wanted in modes do
+        if Runtime.JobMode == wanted then
+            CancelJobs()
+            return
+        end
+    end
+end
+
+local function RefreshFilterDropdowns()
+    if RarityDropdown then pcall(function() RarityDropdown:Refresh(BuildRarityOptions(), true) end) end
+    if BiomeDropdown then pcall(function() BiomeDropdown:Refresh(BuildBiomeOptions(), true) end) end
+end
 
 local StealTab = Window:CreateTab("Steal", "🥚")
 local PlayerTab = Window:CreateTab("Player", "🏃")
-local OthersTab = Window:CreateTab("Others", "🧰")
+local AutoTab = Window:CreateTab("Automation", "⚙")
+local MiscTab = Window:CreateTab("Misc", "🧰")
 
---==============================================================
--- STEAL TAB
---==============================================================
+-- ---------- STEAL ----------
 
 local StatusSection = StealTab:CreateSection("Status")
-StatusLabel = StatusSection:CreateLabel("Status: Idle (everything is OFF)")
+StatusLabel = StatusSection:CreateLabel("Ready - " .. VERSION)
 
-local InstantSection = StealTab:CreateSection("Instant Steal")
+local StealSection = StealTab:CreateSection("Stealing")
 
-InstantSection:CreateToggle({
+StealSection:CreateToggle({
     Name = "Instant Steal", Flag = "InstantSteal", Default = false,
-    Description = "Click Steal once (0.1s hold) - the script flies the egg home for you",
+    Description = "Tap the game's own Steal button; the script flies the egg straight to the SafeZone",
     Callback = function(on)
-        InstantSteal = on
+        if not on then CancelMode("manual") end
+    end,
+})
+
+StealSection:CreateToggle({
+    Name = "Auto Steal", Flag = "AutoSteal", Default = false,
+    Description = "Steal a matching egg, escape straight to the SafeZone, repeat",
+    Callback = function(on)
         if on then
-            EnsureListeners()
-            ApplyFastToAll()
-            Notify("Instant Steal", "ON: click Steal and the flight delivery takes over.", "success", 3)
+            task.spawn(function()
+                pcall(RefreshSnapshot)
+                RefreshFilterDropdowns()
+            end)
         else
-            RestoreHolds()
-            Notify("Instant Steal", "OFF: original hold time restored.", "info", 3)
+            CancelMode("safezone")
         end
     end,
 })
 
-InstantSection:CreateDropdown({
-    Name = "Delivery Strategy", Flag = "DeliveryStrategy",
-    Options = { "Forest Drop + Re-Steal", "Direct Flight Home", "Nearest Area Drop" },
-    Default = "Forest Drop + Re-Steal",
-    Description = "Forest Drop = land at the Forest EggPoint, drop, re-steal, fly home (safest). Direct = straight home (fastest)",
-    Callback = function(v) if v then Strategy = v end end,
+RarityDropdown = StealSection:CreateDropdown({
+    Name = "Rarity", Flag = "Rarities", Multi = true, Search = true,
+    Options = BuildRarityOptions(), Default = {},
+    Description = "Not set = random. Built live from the game's own catalog (field-egg rarities only)",
 })
 
-InstantSection:CreateButton({
-    Name = "Steal Best Egg Now", ButtonText = "Steal",
-    Description = "One full cycle: fly to the best matching egg, steal it, deliver it",
-    Callback = function()
-        if Busy then Notify("Rage Hub", "Already busy - press Stop first.", "warning", 3) return end
-        EnsureListeners()
-        task.spawn(function()
-            RefreshSnapshot()
-            local egg = PickBestEgg()
-            if not egg then
-                Notify("Steal", "No egg matches your filters right now.", "warning", 4)
-                return
-            end
-            Busy = true
-            local id = NewJob()
-            GetOffTreadmillSafe()
-            local ok, err = pcall(RunStealCycle, id, egg)
-            if not ok then Notify("Steal", "Error: " .. tostring(err), "error", 4) end
-            CamRelease(); EndFlight(); Busy = false
-        end)
-    end,
+BiomeDropdown = StealSection:CreateDropdown({
+    Name = "Biome", Flag = "Biomes", Multi = true, Search = true,
+    Options = BuildBiomeOptions(), Default = {},
+    Description = "Not set = random. Real areas only (Enchanted Forest is WIP and hidden)",
 })
 
-InstantSection:CreateParagraph({
-    Title = "Workflow",
-    Content = "Steal (you or Auto Steal) -> lift off +50 -> fly 500 studs/s to the Forest EggPoint -> land -> Drop -> re-steal -> fly back to spawn. Crossing into the SafeZone redeems the egg into your inventory. If a guard slaps it out of you, it chases the egg and takes it back.",
+StealSection:CreateToggle({
+    Name = "Auto Treadmill", Flag = "AutoTreadmill", Default = false,
+    Description = "Wears YOUR plot's treadmill (no flying - the server relocates you itself)",
 })
 
-local AutoSection = StealTab:CreateSection("Auto Steal + Filter")
-
-AutoSection:CreateToggle({
-    Name = "Auto Steal (Filtered)", Flag = "AutoSteal", Default = false,
-    Description = "Fly to a matching egg, steal it, deliver it, repeat",
+StealSection:CreateToggle({
+    Name = "Help Friend (Manual Steal)", Flag = "HelpFriend", Default = false,
+    Description = "Your manual steals get dropped at the Forest middle for a friend instead of redeemed",
     Callback = function(on)
-        AutoSteal = on
-        if on then
-            EnsureListeners()
-            task.spawn(RefreshSnapshot)
-            StartLoop()
-            Notify("Auto Steal", "ON. With Auto Treadmill on, it leaves the treadmill when a match spawns.", "success", 3)
-        else
-            if Busy then CancelAll("Auto Steal stopped") end
-            Notify("Auto Steal", "OFF.", "info", 2)
-        end
+        if not on then CancelMode("manual") end
     end,
 })
 
-AutoSection:CreateDropdown({
-    Name = "Rarities", Flag = "Rarities", Multi = true, SelectAll = true, Search = true,
-    Options = RARITY_LIST, Default = {},
-    Description = "e.g. Divine + Eternal. Empty = any rarity (live from the game's catalog)",
-    Callback = function(list)
-        SelectedRarities = {}
-        for _, name in ipairs(list or {}) do SelectedRarities[tostring(name)] = true end
-    end,
-})
-
-AutoSection:CreateDropdown({
-    Name = "Biomes", Flag = "Biomes", Multi = true, SelectAll = true, Search = true,
-    Options = BIOMES, Default = {},
-    Description = "e.g. Enchanted Forest only. Empty = any biome",
-    Callback = function(list)
-        SelectedBiomes = {}
-        for _, name in ipairs(list or {}) do SelectedBiomes[Norm(name)] = true end
-    end,
-})
-
-AutoSection:CreateDropdown({
-    Name = "Pick Order", Flag = "PickOrder",
-    Options = { "Highest Rarity", "Biggest Size", "Nearest" }, Default = "Highest Rarity",
-    Callback = function(v) if v then Priority = v end end,
-})
-
-AutoSection:CreateToggle({
-    Name = "Allow Unknown Rarity", Flag = "AllowUnknownRarity", Default = false,
-    Description = "Also take eggs whose rarity can't be read",
-    Callback = function(on) AllowUnknownRarity = on end,
-})
-
-AutoSection:CreateToggle({
-    Name = "Egg Alert", Flag = "EggAlert", Default = false,
-    Description = "Notify when a matching egg spawns (no moving)",
+StealSection:CreateToggle({
+    Name = "Auto Help Friend", Flag = "AutoHelpFriend", Default = false,
+    Description = "AFK mode: auto-steal matching eggs and drop them at the Forest middle",
     Callback = function(on)
-        EggAlert = on
-        if on then EnsureListeners(); task.spawn(RefreshSnapshot) end
+        if not on then CancelMode("friend") end
     end,
 })
 
-AutoSection:CreateToggle({
-    Name = "Rare Spawn Alert", Flag = "RareSpawnAlert", Default = true,
-    Description = "The server's own 'Secret ... spawned' broadcasts",
-    Callback = function(on) RareSpawnAlert = on; if on then EnsureListeners() end end,
-})
-
-AutoSection:CreateButton({
-    Name = "Scan Eggs", ButtonText = "Scan",
-    Description = "Fills the report below (why eggs match or not)",
-    Callback = function() task.spawn(RunScan) end,
-})
-
-ScanLog = AutoSection:CreateLog({ Name = "Report", Height = 170, MaxLines = 80 })
-
-local WorkflowSection = StealTab:CreateSection("Workflow")
-
-WorkflowSection:CreateToggle({
-    Name = "Camera Focus", Flag = "CameraFocus", Default = true,
-    Description = "Camera watches the egg while stealing it; follows your flight after",
-    Callback = function(on) CameraFocus = on; if not on then CamRelease() end end,
-})
-
-WorkflowSection:CreateToggle({
-    Name = "Skip Strong Guards", Flag = "SkipStrongGuards", Default = false,
-    Description = "Auto Steal ignores eggs whose guard you can't outrun (uses each area's live speed requirement)",
-    Callback = function(on) SkipDangerous = on end,
-})
-
-WorkflowSection:CreateSlider({
-    Name = "Max Recoveries", Flag = "MaxRecoveries", Range = { 0, 6 }, Increment = 1, Default = CFG.MaxRecoveries,
-    Description = "Times it goes back for an egg a guard took from you",
-    Callback = function(v) CFG.MaxRecoveries = v end,
-})
-
-WorkflowSection:CreateSlider({
-    Name = "Drop Stop Delay", Flag = "StopDelay", Range = { 0, 1 }, Increment = 0.05, Default = CFG.StopDelay,
-    Suffix = " s", Description = "How long it stands at the drop point before dropping",
-    Callback = function(v) CFG.StopDelay = v end,
-})
-
-local FlightSection = StealTab:CreateSection("Flight")
-
-FlightSection:CreateSlider({
-    Name = "Fly Speed", Flag = "FlySpeed", Range = { 100, 1500 }, Increment = 25, Default = CFG.FlySpeed,
-    Suffix = " studs/s", Description = "Cruise speed for every flight",
-    Callback = function(v) CFG.FlySpeed = v end,
-})
-
-FlightSection:CreateSlider({
-    Name = "Fly Offset", Flag = "FlyOffset", Range = { 10, 150 }, Increment = 5, Default = CFG.FlyOffset,
-    Suffix = " studs", Description = "Cruise this high above the higher endpoint",
-    Callback = function(v) CFG.FlyOffset = v end,
-})
-
-FlightSection:CreateSlider({
-    Name = "Descend Radius", Flag = "DescendRadius", Range = { 8, 80 }, Increment = 1, Default = CFG.DescendRadius,
-    Suffix = " studs", Description = "Start descending when this close to the target",
-    Callback = function(v) CFG.DescendRadius = v end,
-})
-
-FlightSection:CreateSlider({
-    Name = "Hover Height", Flag = "HoverHeight", Range = { 2, 12 }, Increment = 1, Default = CFG.HoverHeight,
-    Suffix = " studs", Description = "Stop this high above the target point",
-    Callback = function(v) CFG.HoverHeight = v end,
-})
-
-FlightSection:CreateToggle({
-    Name = "Noclip During Flight", Flag = "FlightNoclip", Default = true,
-    Description = "Pass through trees/walls while flying (restored after)",
-    Callback = function(on) FlightNoclip = on end,
-})
-
-FlightSection:CreateButton({
-    Name = "Stop Everything", ButtonText = "Stop",
-    Description = "Cancels the current job and kills all movement",
-    Callback = function()
-        CancelAll("Stopped")
-        Notify("Rage Hub", "Stopped.", "info", 2)
-    end,
-})
-
---==============================================================
--- PLAYER TAB
---==============================================================
-
-local MovementSection = PlayerTab:CreateSection("Movement")
-
-MovementSection:CreateToggle({
-    Name = "Speed Adjust", Flag = "SpeedAdjust", Default = false,
-    Description = "Sets your WalkSpeed to the slider value",
-    Callback = function(on) SpeedAdjust = on; ApplySpeed() end,
-})
-
-MovementSection:CreateSlider({
-    Name = "Walk Speed", Flag = "PlayerSpeed", Range = { 16, 500 }, Increment = 2, Default = CFG.PlayerSpeed,
-    Callback = function(v) CFG.PlayerSpeed = v; if SpeedAdjust then ApplySpeed() end end,
-})
-
-MovementSection:CreateToggle({
-    Name = "Infinite Jump", Flag = "InfiniteJump", Default = false,
-    Callback = function(on) InfiniteJump = on end,
-})
-
-MovementSection:CreateToggle({
-    Name = "Noclip", Flag = "Noclip", Default = false,
-    Callback = function(on) Noclip = on end,
-})
+-- ---------- PLAYER ----------
 
 local ProtectSection = PlayerTab:CreateSection("Protection")
 
 ProtectSection:CreateToggle({
     Name = "Anti Ragdoll", Flag = "AntiRagdoll", Default = false,
-    Description = "Blocks ragdoll, knockback and flinging (skipped while flying)",
-    Callback = function(on) SetAntiRagdoll(on) end,
+    Description = "Local anti-fling hygiene: motors, physics junk, launch clamp, player collisions. The 2.5s server ragdoll can still happen",
+    Callback = function(on)
+        SetAntiRagdoll(on and true or false)
+    end,
 })
 
-local SessionSection = PlayerTab:CreateSection("Session")
+-- ---------- AUTOMATION ----------
+
+local SellSection = AutoTab:CreateSection("Auto Sell")
+
+SellSection:CreateDropdown({
+    Name = "Egg Rarity Filter", Flag = "SellEggRarity", Multi = true, Search = true,
+    Options = BuildRarityOptions(), Default = {},
+    Description = "Not set = sell all unprotected eggs (placed / favourite / fused eggs are never sold)",
+})
+
+SellSection:CreateDropdown({
+    Name = "Pet Rarity Filter", Flag = "SellPetRarity", Multi = true, Search = true,
+    Options = BuildPetRarityOptions(), Default = {},
+    Description = "Not set = sell all unprotected pets (equipped / favourite / fused pets are never sold)",
+})
+
+SellSection:CreateToggle({
+    Name = "Sell Eggs", Flag = "AutoSellEggs", Default = false,
+    Description = "Every 5s via the satchel's own SellSelection remote",
+})
+
+SellSection:CreateToggle({
+    Name = "Sell Pets", Flag = "AutoSellPets", Default = false,
+    Description = "Every 5s via the satchel's own SellSelection remote",
+})
+
+local EggAutoSection = AutoTab:CreateSection("Eggs")
+
+EggAutoSection:CreateToggle({
+    Name = "Auto Place Egg", Flag = "AutoPlaceEgg", Default = false,
+    Description = "Wear tool, then place on a free spot of your plot (5+ studs from other eggs)",
+})
+
+EggAutoSection:CreateToggle({
+    Name = "Auto Hatch Egg", Flag = "AutoHatch", Default = false,
+    Description = "Hatch placed eggs: AskHatch, 6.2s, AskFinishHatch (the game's own timing)",
+})
+
+local PetAutoSection = AutoTab:CreateSection("Pets & Events")
+
+PetAutoSection:CreateToggle({
+    Name = "Auto Catch Butterfly", Flag = "AutoButterfly", Default = false,
+    Description = "Unverified remote shapes - swings the net when a butterfly blooms in reach; chases only while idle",
+})
+
+PetAutoSection:CreateToggle({
+    Name = "Auto Place Best Pet", Flag = "AutoBestPet", Default = false,
+    Description = "Wear best pets whenever new pets appear (every 30s)",
+})
+
+local EconomySection = AutoTab:CreateSection("Economy")
+
+EconomySection:CreateToggle({
+    Name = "Auto Claim Money", Flag = "AutoClaim", Default = false,
+    Description = "Away earnings claim + codex redeem, every 2 minutes",
+})
+
+EconomySection:CreateToggle({
+    Name = "Auto Upgrade Treadmill", Flag = "AutoUpgradeTreadmill", Default = false,
+    Description = "Buys the next treadmill tier when you can afford it",
+})
+
+EconomySection:CreateToggle({
+    Name = "Auto Buy Trail", Flag = "AutoBuyTrail", Default = false,
+    Description = "Buys the most expensive affordable shop trail, then equips it",
+})
+
+-- ---------- MISC ----------
+
+local SessionSection = MiscTab:CreateSection("Session")
 
 SessionSection:CreateToggle({
-    Name = "Anti AFK", Flag = "AntiAFK", Default = false,
-    Callback = function(on) SetAntiAfk(on) end,
+    Name = "Anti AFK", Flag = "AntiAfk", Default = true,
+    Description = "Virtual input every 45s so the game's own idle detector stays quiet",
 })
 
 SessionSection:CreateToggle({
     Name = "Auto Reconnect", Flag = "AutoReconnect", Default = false,
-    Description = "Rejoins if you get disconnected",
-    Callback = function(on) SetAutoReconnect(on) end,
+    Description = "Rejoins after a kick or disconnect (up to 8 tries)",
 })
 
 SessionSection:CreateToggle({
     Name = "Auto Execute", Flag = "AutoExecute", Default = false,
-    Description = "Re-runs the script after teleport / rejoin",
-    Callback = function(on) SetAutoExecute(on) end,
+    Description = "Queue this script for the next server (survives hops and the game's own AFK hop)",
+    Callback = function(on)
+        if on then QueueAutoExecute() end
+    end,
 })
 
-SessionSection:CreateButton({
-    Name = "Rejoin Server", ButtonText = "Rejoin",
+local ConfigSection = MiscTab:CreateSection("Config")
+
+ConfigSection:CreateToggle({
+    Name = "Auto Save Config", Flag = "PrefAutoSave", Default = Prefs.AutoSave,
+    Description = "Saves your toggles/filters 1.2s after any change (stored in its own _prefs file too)",
+    Callback = function(on)
+        Prefs.AutoSave = on and true or false
+        SavePrefs()
+        Window.AutoSaveName = on and "autosave" or nil
+    end,
+})
+
+ConfigSection:CreateToggle({
+    Name = "Auto Load Config", Flag = "PrefAutoLoad", Default = Prefs.AutoLoad,
+    Description = "Restores the saved config on execute (this preference itself lives outside the config)",
+    Callback = function(on)
+        Prefs.AutoLoad = on and true or false
+        SavePrefs()
+        if on then
+            task.spawn(function()
+                local okLoad, loaded = pcall(function() return Window:LoadConfig() end)
+                if okLoad and loaded then
+                    RefreshFilterDropdowns()
+                    Notify("Config", "Saved config restored.", "success", 3)
+                end
+            end)
+        end
+    end,
+})
+
+local ServerSection = MiscTab:CreateSection("Server")
+
+ServerSection:CreateButton({
+    Name = "Hop to Lowest Server", ButtonText = "Hop", Cooldown = 10,
+    Description = "6 samples, keeps servers seen in every sample, lowest player count",
     Callback = function()
-        pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+        HopToLowest()
+    end,
+})
+
+ServerSection:CreateButton({
+    Name = "Unload", ButtonText = "Unload",
+    Description = "Restores camera, replication focus and collisions, then closes the window",
+    Callback = function()
+        Window:Destroy()
     end,
 })
 
 --==============================================================
--- OTHERS TAB
+-- INIT
 --==============================================================
 
-local FarmSection = OthersTab:CreateSection("Auto Farm (game's own actions)")
+ConnectGameEvents()
+SetupAntiAfk()
+SetupReconnect()
 
-FarmSection:CreateToggle({
-    Name = "Auto Equip Best", Flag = "AutoEquipBest", Default = false,
-    Description = "Calls the game's Equip Best every interval",
-    Callback = function(on) AutoEquipBest = on; LastEquip = 0; if on then StartMaintLoop() end end,
-})
+Track(LocalPlayer.CharacterAdded:Connect(OnCharacterAdded))
+if LocalPlayer.Character then
+    OnCharacterAdded(LocalPlayer.Character)
+end
 
-FarmSection:CreateSlider({
-    Name = "Equip Best Interval", Flag = "EquipInterval", Range = { 5, 300 }, Increment = 5, Default = CFG.EquipInterval,
-    Suffix = " s", Callback = function(v) CFG.EquipInterval = v end,
-})
-
-FarmSection:CreateToggle({
-    Name = "Auto Claim Away Earnings", Flag = "AutoClaimAway", Default = false,
-    Description = "Claims offline earnings every interval",
-    Callback = function(on) AutoClaimAway = on; LastClaim = 0; if on then StartMaintLoop() end end,
-})
-
-FarmSection:CreateSlider({
-    Name = "Claim Interval", Flag = "ClaimInterval", Range = { 30, 600 }, Increment = 10, Default = CFG.ClaimInterval,
-    Suffix = " s", Callback = function(v) CFG.ClaimInterval = v end,
-})
-
-local TreadmillSection = OthersTab:CreateSection("Treadmill")
-
-TreadmillSection:CreateToggle({
-    Name = "Auto Treadmill", Flag = "AutoTreadmill", Default = false,
-    Description = "Flies to YOUR treadmill, wears it, returns if you leave",
-    Callback = function(on)
-        AutoTreadmill = on
-        if on then
-            EnsureListeners()
-            StartLoop()
-            TreadmillRetryAt = 0
-            Notify("Auto Treadmill", "ON.", "success", 2)
-        else
-            if Busy then CancelAll() end
-            Notify("Auto Treadmill", "OFF: no more returning to the treadmill.", "info", 3)
+Supervisor("StealEngine", 1.0, StealEngineTick)
+Supervisor("AutoTreadmill", 1.0, AutoTreadmillTick)
+Supervisor("AntiRagdoll", 0.2, AntiRagdollTick)
+Supervisor("AutoSell", SELL_INTERVAL, AutoSellTick)
+Supervisor("AutoPlace", PLACE_INTERVAL, AutoPlaceTick)
+Supervisor("AutoHatch", 1.0, AutoHatchTick)
+Supervisor("AutoBestPet", BESTPET_INTERVAL, AutoBestPetTick)
+Supervisor("AutoClaim", CLAIM_INTERVAL, AutoClaimTick)
+Supervisor("AutoUpgradeTreadmill", UPGRADE_INTERVAL, AutoUpgradeTreadmillTick)
+Supervisor("AutoBuyTrail", BUYTRAIL_INTERVAL, AutoBuyTrailTick)
+Supervisor("AntiAfk", AFK_INTERVAL, AntiAfkTick)
+Supervisor("ButterflyWatch", 30, TryConnectButterflies)
+Supervisor("Watchdog", 2, function()
+    for name, entry in Supervisors do
+        if name ~= "Watchdog" and os.clock() - entry.HB > entry.Interval + 6 then
+            entry.HB = os.clock()
+            entry.Restart()
+            warn("[RageHub] supervisor '" .. name .. "' stalled - restarted")
         end
-    end,
-})
-
-local LabSection = OthersTab:CreateSection("Experimental (game's own remotes)")
-
-LabSection:CreateToggle({
-    Name = "Auto Place New Eggs", Flag = "AutoPlaceEggs", Default = false,
-    Description = "Places eggs you haven't placed yet into your pen (AskPlaceEgg)",
-    Callback = function(on)
-        AutoPlaceEggs = on
-        if on then
-            EnsureListeners()
-            StartMaintLoop()
-            Notify("Auto Place", "ON: new eggs get placed into your pen.", "success", 3)
-        end
-    end,
-})
-
-LabSection:CreateToggle({
-    Name = "Auto Hatch Placed Eggs", Flag = "AutoHatchEggs", Default = false,
-    Description = "Tries AskHatch + AskFinishHatch on placed eggs; the server only allows grown ones",
-    Callback = function(on)
-        AutoHatchEggs = on
-        if on then
-            EnsureListeners()
-            StartMaintLoop()
-            Notify("Auto Hatch", "ON: grown eggs get hatched automatically.", "success", 3)
-        end
-    end,
-})
-
-LabSection:CreateSlider({
-    Name = "Hatch Check Interval", Flag = "HatchInterval", Range = { 15, 300 }, Increment = 5, Default = CFG.HatchInterval,
-    Suffix = " s", Callback = function(v) CFG.HatchInterval = v end,
-})
-
-local QuickSection = OthersTab:CreateSection("Quick Actions")
-
-QuickSection:CreateButton({
-    Name = "Equip Best Now", ButtonText = "Equip",
-    Callback = function()
-        task.spawn(function()
-            local ok, r = DoEquipBest()
-            Notify("Equip Best", ok and "Done." or ("Failed: " .. tostring(r)), ok and "success" or "error", 3)
-        end)
-    end,
-})
-
-QuickSection:CreateButton({
-    Name = "Claim Away Earnings Now", ButtonText = "Claim",
-    Callback = function()
-        task.spawn(function()
-            local ok, r = DoClaimAway()
-            Notify("Away Earnings", ok and "Claimed (or nothing to claim)." or ("Failed: " .. tostring(r)), ok and "success" or "error", 3)
-        end)
-    end,
-})
-
-QuickSection:CreateButton({
-    Name = "Deliver Carried Egg", ButtonText = "Deliver",
-    Description = "If you are holding an egg, fly it home now",
-    Callback = function()
-        if Busy then Notify("Rage Hub", "Already busy - press Stop first.", "warning", 3) return end
-        if not IsCarryingNow() then
-            Notify("Deliver", "You are not carrying an egg.", "warning", 3)
-            return
-        end
-        EnsureListeners()
-        Busy = true
-        local id = NewJob()
-        task.spawn(function()
-            local ok, err = pcall(DeliverPhase, id, CarriedUid, nil)
-            if not ok then Notify("Deliver", "Error: " .. tostring(err), "error", 4) end
-            CamRelease(); EndFlight(); Busy = false
-        end)
-    end,
-})
-
-local ScriptSection = OthersTab:CreateSection("Script")
-
-ScriptSection:CreateToggle({
-    Name = "Auto Save Config", Flag = "AutoSaveConfig", Default = true,
-    Description = "Saves everything; restored on rejoin / auto execute",
-    Callback = function(on)
-        AutoSaveOn = on
-        pcall(function() Window.AutoSaveName = on and "autosave" or nil end)
-    end,
-})
-
-ScriptSection:CreateButton({
-    Name = "Reset Saved Config", ButtonText = "Reset",
-    Description = "Deletes the saved config (toggles start OFF next time)",
-    Callback = function()
-        pcall(function() Window:DeleteConfig("autosave") end)
-        Notify("Config", "Saved config deleted.", "success", 3)
-    end,
-})
-
-ScriptSection:CreateButton({
-    Name = "Unload Script", ButtonText = "Unload",
-    Description = "Stops everything and removes the UI",
-    Callback = function() pcall(function() Window:Destroy() end) end,
-})
-
-OthersTab:CreateSection("Notes"):CreateParagraph({
-    Title = "Delivery strategies",
-    Content = "Forest Drop + Re-Steal: the Forest guard is the weakest (needs speed 11, runs 11.6) and its EggPoint is the closest spot to the SafeZone - dropping there and re-stealing hands the chase to a guard that can never catch you. Direct Flight Home skips the stop and is fastest. Nearest Area Drop behaves like the old Auto option.",
-})
-
-Notify("Rage Hub", "v2 Flight Edition loaded.", "success", 3)
-SetStatus("Idle (everything is OFF)")
-
--- restore your saved config (filters + any toggles that were ON turn back on by themselves)
-task.delay(1.2, function()
-    if Unloaded then return end
-    local ok, loaded = pcall(function() return Window:LoadConfig() end)
-    if ok and loaded then
-        Notify("Config", "Saved config restored.", "success", 3)
     end
+end)
+
+task.spawn(function()
+    pcall(RefreshSnapshot)
+    RefreshFilterDropdowns()
+end)
+
+Notify("Rage Hub", "Steal An Egg " .. VERSION .. " loaded.", "success", 3)
+
+task.delay(1.0, function()
+    if not Runtime.Alive then return end
+    if Prefs.AutoLoad then
+        local okLoad, loaded = pcall(function() return Window:LoadConfig() end)
+        if okLoad and loaded then
+            RefreshFilterDropdowns()
+            Notify("Config", "Saved config restored.", "success", 3)
+        end
+    end
+    QueueAutoExecute()
+    SetStatus("Ready - " .. VERSION)
 end)
