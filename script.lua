@@ -1,5 +1,5 @@
 --//==============================================================
---//  Rage Hub · Steal An Egg · v1  (Flight Edition rebuild)
+--//  Rage Hub · Steal An Egg · alpha  (Flight Edition)
 --//==============================================================
 --//  Target: Delta (mobile executor), Rage Hub v1.0.0 UI library.
 --//
@@ -8,6 +8,24 @@
 --//             and cruise together, vertical descent only inside the
 --//             last 25 studs, stop 3 studs above the target. Velocity
 --//             is zeroed every frame so nothing fights the humanoid.
+--//             Takeoff ramps up from standstill and the final studs
+--//             brake to a stop, so every replicated position delta
+--//             stays smooth - no teleport-like spikes.
+--//
+--//  ANTI-DETECTION (honest scope - there is no bypass code here):
+--//             * loading moves NOTHING and calls NO remotes. The
+--//               first seconds only build the UI and attach passive
+--//               read-only listeners, exactly like any game UI.
+--//             * nothing hooks, blocks, fakes or races the anti-cheat
+--//               or RigSync. Armed anti-TP regions (MonsterEventMap /
+--//               AnticheatSuspendedRegion) are READ, then flown over,
+--//               flown around, or the egg is refused.
+--//             * glides ramp in and brake out, so replication sees
+--//               continuous motion instead of jumps.
+--//             * what cannot be promised: a server that started
+--//               checking raw speed could still flag 500 studs/s.
+--//               No honest script can guarantee invisibility - this
+--//               one refuses to fake its way around that.
 --//
 --//  HONESTY  : nothing in this file was executed inside Roblox. It
 --//             passes luau-compile + luau-analyze only. Remotes are
@@ -15,12 +33,6 @@
 --//             sends (shapes taken from your RageDump). Nothing is
 --//             hooked, blocked, faked or replayed - no firesignal on
 --//             server events, no RigSync / anti-cheat tampering.
---//
---//  SAFETY   : the client ObbyAntiTP check only runs inside armed
---//             event regions (workspace.MonsterEventMap or the
---//             AnticheatSuspendedRegion attribute). This script READS
---//             those regions before every glide and goes over them,
---//             around them, or refuses the egg. No bypass code.
 --//==============================================================
 
 local LibraryOk, RageHub = pcall(function()
@@ -50,11 +62,13 @@ local LocalPlayer = Players.LocalPlayer
 -- CONSTANTS  (all numbers live here - no sliders in the UI)
 --==============================================================
 
-local VERSION            = "v1"
+local VERSION            = "alpha"
 local AUTO_EXECUTE_URL   = "https://raw.githubusercontent.com/DevNameGelo/rap-rage/refs/heads/main/script.lua"
 local PREFS_PATH         = "RageHub/StealAnEgg/_prefs.json"
 
 local FLIGHT_SPEED       = 500     -- studs/s cruise + climb speed
+local RAMP_TIME          = 0.5     -- s takeoff acceleration (smooth replication deltas)
+local BRAKE_RANGE        = 14      -- studs of proportional braking before the stop
 local CRUISE_OFFSET      = 50      -- glide this far above max(start, target)
 local GROUND_CLEARANCE   = 60      -- never cruise lower than ground + 60
 local DESCEND_RANGE      = 25      -- horizontal studs where descent begins
@@ -180,6 +194,22 @@ local function Notify(title, content, kind, duration)
     pcall(function()
         Window:Notify({ Title = title, Content = content, Type = kind or "info", Duration = duration or 4 })
     end)
+end
+
+-- Config loads fire every element callback synchronously (that is how
+-- the library applies values). Without a guard, loading a saved
+-- "Auto Load Config = true" fires that toggle's callback, which loads
+-- the config again, which fires the callback again... an infinite loop
+-- that spammed "Saved config restored" notifications forever. One
+-- guard breaks the cycle: callbacks echoed from a load in progress are
+-- ignored, so only a real tap on the toggle ever loads again.
+local ConfigLoading = false
+local function SafeLoadConfig()
+    if ConfigLoading or not Window then return false end
+    ConfigLoading = true
+    local ok, applied = pcall(function() return Window:LoadConfig() end)
+    ConfigLoading = false
+    return ok and applied == true
 end
 
 local function NewToken()
@@ -528,6 +558,8 @@ end
 -- GLIDE  (one continuous CFrame-stepped flight per leg)
 --   climb+cruise at 500 studs/s toward the point above the target,
 --   descend only inside the last 25 studs, stop 3 studs above it.
+--   Takeoff ramps up from standstill and the final studs brake to a
+--   stop (smooth deltas: nothing looks like a teleport spike).
 --   Returns: true  |  false, reason  (cancelled / dead / ragdoll /
 --   region / ground / timeout / busy / error)
 --==============================================================
@@ -637,7 +669,19 @@ local function Glide(targetPos, token, opts)
             end
         end
 
-        local stepDist = math.min(FLIGHT_SPEED * dt, dist)
+        -- smooth takeoff + landing: speed ramps up from standstill and
+        -- brakes near the target, so the server never sees a teleport
+        -- spike where motion starts or stops at full speed
+        local speed = FLIGHT_SPEED
+        local elapsed = os.clock() - startedAt
+        if elapsed < RAMP_TIME then
+            local ramp = math.clamp(elapsed / RAMP_TIME, 0, 1)
+            speed = FLIGHT_SPEED * (0.25 + 0.75 * ramp * ramp)
+        end
+        if dist < BRAKE_RANGE then
+            speed = math.min(speed, math.max(70, FLIGHT_SPEED * dist / BRAKE_RANGE))
+        end
+        local stepDist = math.min(speed * dt, dist)
         local newPos = pos + (delta / dist) * stepDist
         traveled += stepDist
         root2.CFrame = CFrame.new(newPos) * root2.CFrame.Rotation
@@ -2315,7 +2359,6 @@ end
 
 local StealTab = Window:CreateTab("Steal", "🥚")
 local PlayerTab = Window:CreateTab("Player", "🏃")
-local AutoTab = Window:CreateTab("Automation", "⚙")
 local MiscTab = Window:CreateTab("Misc", "🧰")
 
 -- ---------- STEAL ----------
@@ -2393,9 +2436,29 @@ ProtectSection:CreateToggle({
     end,
 })
 
--- ---------- AUTOMATION ----------
+-- ---------- MISC (the former Automation tab lives here now) ----------
 
-local SellSection = AutoTab:CreateSection("Auto Sell")
+local SessionSection = MiscTab:CreateSection("Session")
+
+SessionSection:CreateToggle({
+    Name = "Anti AFK", Flag = "AntiAfk", Default = true,
+    Description = "Virtual input every 45s so the game's own idle detector stays quiet",
+})
+
+SessionSection:CreateToggle({
+    Name = "Auto Reconnect", Flag = "AutoReconnect", Default = false,
+    Description = "Rejoins after a kick or disconnect (up to 8 tries)",
+})
+
+SessionSection:CreateToggle({
+    Name = "Auto Execute", Flag = "AutoExecute", Default = false,
+    Description = "Queue this script for the next server (survives hops and the game's own AFK hop)",
+    Callback = function(on)
+        if on then QueueAutoExecute() end
+    end,
+})
+
+local SellSection = MiscTab:CreateSection("Auto Sell")
 
 SellSection:CreateDropdown({
     Name = "Egg Rarity Filter", Flag = "SellEggRarity", Multi = true, Search = true,
@@ -2419,7 +2482,7 @@ SellSection:CreateToggle({
     Description = "Every 5s via the satchel's own SellSelection remote",
 })
 
-local EggAutoSection = AutoTab:CreateSection("Eggs")
+local EggAutoSection = MiscTab:CreateSection("Eggs")
 
 EggAutoSection:CreateToggle({
     Name = "Auto Place Egg", Flag = "AutoPlaceEgg", Default = false,
@@ -2431,7 +2494,7 @@ EggAutoSection:CreateToggle({
     Description = "Hatch placed eggs: AskHatch, 6.2s, AskFinishHatch (the game's own timing)",
 })
 
-local PetAutoSection = AutoTab:CreateSection("Pets & Events")
+local PetAutoSection = MiscTab:CreateSection("Pets & Events")
 
 PetAutoSection:CreateToggle({
     Name = "Auto Catch Butterfly", Flag = "AutoButterfly", Default = false,
@@ -2443,7 +2506,7 @@ PetAutoSection:CreateToggle({
     Description = "Wear best pets whenever new pets appear (every 30s)",
 })
 
-local EconomySection = AutoTab:CreateSection("Economy")
+local EconomySection = MiscTab:CreateSection("Economy")
 
 EconomySection:CreateToggle({
     Name = "Auto Claim Money", Flag = "AutoClaim", Default = false,
@@ -2458,28 +2521,6 @@ EconomySection:CreateToggle({
 EconomySection:CreateToggle({
     Name = "Auto Buy Trail", Flag = "AutoBuyTrail", Default = false,
     Description = "Buys the most expensive affordable shop trail, then equips it",
-})
-
--- ---------- MISC ----------
-
-local SessionSection = MiscTab:CreateSection("Session")
-
-SessionSection:CreateToggle({
-    Name = "Anti AFK", Flag = "AntiAfk", Default = true,
-    Description = "Virtual input every 45s so the game's own idle detector stays quiet",
-})
-
-SessionSection:CreateToggle({
-    Name = "Auto Reconnect", Flag = "AutoReconnect", Default = false,
-    Description = "Rejoins after a kick or disconnect (up to 8 tries)",
-})
-
-SessionSection:CreateToggle({
-    Name = "Auto Execute", Flag = "AutoExecute", Default = false,
-    Description = "Queue this script for the next server (survives hops and the game's own AFK hop)",
-    Callback = function(on)
-        if on then QueueAutoExecute() end
-    end,
 })
 
 local ConfigSection = MiscTab:CreateSection("Config")
@@ -2500,10 +2541,11 @@ ConfigSection:CreateToggle({
     Callback = function(on)
         Prefs.AutoLoad = on and true or false
         SavePrefs()
-        if on then
+        -- the ConfigLoading guard skips the echo fired while a config
+        -- load applies this same toggle; only a real tap loads again
+        if on and not ConfigLoading then
             task.spawn(function()
-                local okLoad, loaded = pcall(function() return Window:LoadConfig() end)
-                if okLoad and loaded then
+                if SafeLoadConfig() then
                     RefreshFilterDropdowns()
                     Notify("Config", "Saved config restored.", "success", 3)
                 end
@@ -2529,6 +2571,9 @@ ServerSection:CreateButton({
         Window:Destroy()
     end,
 })
+
+local ProfileSection = MiscTab:CreateSection("Low Profile")
+ProfileSection:CreateLabel("No hooks · nothing modified · load is read-only · regions avoided, never bypassed · glide ramps keep movement smooth")
 
 --==============================================================
 -- INIT
@@ -2572,14 +2617,11 @@ end)
 
 Notify("Rage Hub", "Steal An Egg " .. VERSION .. " loaded.", "success", 3)
 
-task.delay(1.0, function()
+task.delay(0.35, function()
     if not Runtime.Alive then return end
-    if Prefs.AutoLoad then
-        local okLoad, loaded = pcall(function() return Window:LoadConfig() end)
-        if okLoad and loaded then
-            RefreshFilterDropdowns()
-            Notify("Config", "Saved config restored.", "success", 3)
-        end
+    if Prefs.AutoLoad and SafeLoadConfig() then
+        RefreshFilterDropdowns()
+        Notify("Config", "Saved config restored.", "success", 3)
     end
     QueueAutoExecute()
     SetStatus("Ready - " .. VERSION)
