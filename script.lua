@@ -12,20 +12,29 @@
 --//             brake to a stop, so every replicated position delta
 --//             stays smooth - no teleport-like spikes.
 --//
---//  ANTI-DETECTION (honest scope - there is no bypass code here):
---//             * loading moves NOTHING and calls NO remotes. The
---//               first seconds only build the UI and attach passive
---//               read-only listeners, exactly like any game UI.
---//             * nothing hooks, blocks, fakes or races the anti-cheat
---//               or RigSync. Armed anti-TP regions (MonsterEventMap /
---//               AnticheatSuspendedRegion) are READ, then flown over,
---//               flown around, or the egg is refused.
+--//  PASSIVE LOAD (the anti-detection fix - honest scope):
+--//             * at load the script makes ZERO client-to-server
+--//               calls. No snapshot remote, no game-controller
+--//               require, no polling loop - only the window plus the
+--//               passive read-only S->C listeners, exactly like the
+--//               builds that loaded clean.
+--//             * the egg snapshot is requested ONCE per session,
+--//               only after a steal feature is switched on, never
+--//               earlier than 10 s after load, never on respawn.
+--//             * nothing under .../Controllers is ever required;
+--//               pure Data.* modules load lazily, in pcalls, when a
+--//               feature needs them.
+--//             * the config folder is isolated (StealAnEgg_alpha),
+--//               so no save from an older build is ever applied, and
+--//               every automation tick waits out a 15 s grace.
+--//             * nothing hooks, blocks, fakes or races the anti-
+--//               cheat or RigSync. Armed anti-TP regions are READ,
+--//               then flown over, around, or the egg is refused.
 --//             * glides ramp in and brake out, so replication sees
---//               continuous motion instead of jumps.
---//             * what cannot be promised: a server that started
---//               checking raw speed could still flag 500 studs/s.
---//               No honest script can guarantee invisibility - this
---//               one refuses to fake its way around that.
+--//               continuous motion instead of jumps. What cannot be
+--//               promised: a server checking raw speed could still
+--//               flag 500 studs/s - no honest script can hide that,
+--//               and this one refuses to fake its way around it.
 --//
 --//  HONESTY  : nothing in this file was executed inside Roblox. It
 --//             passes luau-compile + luau-analyze only. Remotes are
@@ -64,7 +73,11 @@ local LocalPlayer = Players.LocalPlayer
 
 local VERSION            = "alpha"
 local AUTO_EXECUTE_URL   = "https://raw.githubusercontent.com/DevNameGelo/rap-rage/refs/heads/main/script.lua"
-local PREFS_PATH         = "RageHub/StealAnEgg/_prefs.json"
+-- Isolated config + prefs folder: a save written by an older build can
+-- never be applied here (an old ON toggle used to arm a feature a
+-- fraction of a second after load - exactly what a cheat looks like).
+local CONFIG_FOLDER      = "RageHub/StealAnEgg_alpha"
+local PREFS_PATH         = CONFIG_FOLDER .. "/_prefs.json"
 
 local FLIGHT_SPEED       = 500     -- studs/s cruise + climb speed
 local RAMP_TIME          = 0.5     -- s takeoff acceleration (smooth replication deltas)
@@ -81,6 +94,8 @@ local TWOLEG_DISTANCE    = 1500    -- farther than this = glide in two legs
 local TWOLEG_BACKOFF     = 900     -- first leg stops this far before the target
 local REGION_INFLATE     = 35      -- extra margin around armed anti-TP regions
 local REGION_OVER_CLEAR  = 25      -- clearance above a region we fly over
+local GRACE_SECONDS      = 15      -- s after load before ANY automation tick acts
+local SNAPSHOT_MIN_WAIT  = 10      -- s after load before the one egg snapshot may fire
 
 local CARRY_RETRIES      = 3       -- AskFieldEggCarry attempts
 local CARRY_RETRY_GAP    = 0.05    -- s between attempts
@@ -163,6 +178,7 @@ local RarityDropdown, BiomeDropdown
 local Runtime = {
     Alive = true, Token = 0, Busy = false, Gliding = false, JobMode = nil,
     CooldownUntil = 0, PauseUntil = 0, LastStatus = "",
+    StartAt = os.clock(), SnapshotDone = false,
     Carry = { IsCarrying = false, Uid = nil, Redeemed = false, LostAt = 0 },
     LastVerdictUid = nil,
     Eggs = {}, Blacklist = {}, JobFailures = {},
@@ -178,6 +194,7 @@ local Runtime = {
     MotorBase = {}, KnownPhysics = {}, SavedCollide = {}, AntiRagdollOn = false,
     AutoExecuteQueued = false, Rejoining = false, ReconnectRetries = 0,
     LastTeleport = nil, HopBusy = false,
+    AfkConn = nil, ReconnectConns = {}, ButterflyConns = {},
     RemoteFails = {},
     PlaceFalseStreak = 0, PlacePauseUntil = 0, LastOthersApply = 0,
     HatchFinFails = {}, LastHatchStart = 0, LastPetSig = "",
@@ -352,6 +369,35 @@ local function Supervisor(name, interval, fn)
     end
     entry.Restart()
     return entry
+end
+
+-- The watchdog is created only once at least one real supervisor runs.
+local function EnsureWatchdog()
+    if Supervisors["Watchdog"] then return end
+    Supervisor("Watchdog", 2, function()
+        for name, entry in Supervisors do
+            if name ~= "Watchdog" and os.clock() - entry.HB > entry.Interval + 6 then
+                entry.HB = os.clock()
+                entry.Restart()
+                warn("[RageHub] supervisor '" .. name .. "' stalled - restarted")
+            end
+        end
+    end)
+end
+
+-- Lazy start: a feature's loop is created the first time its toggle is
+-- switched on (by a tap or by a restored config) - never at load.
+local function EnsureSupervisor(name, interval, fn)
+    if Supervisors[name] then return Supervisors[name] end
+    local entry = Supervisor(name, interval, fn)
+    EnsureWatchdog()
+    return entry
+end
+
+-- Startup grace: no automation tick acts before this turns false, so
+-- restored toggles wake up well after the executor attached.
+local function InStartupGrace()
+    return os.clock() - Runtime.StartAt < GRACE_SECONDS
 end
 
 --==============================================================
@@ -717,13 +763,22 @@ end
 --==============================================================
 
 local AssetsDir, RarityDir
-pcall(function()
-    local dataFolder = ReplicatedStorage:WaitForChild("Data", 10)
-    local assetsModule = dataFolder and dataFolder:WaitForChild("Assets", 5)
-    local rarityModule = dataFolder and dataFolder:WaitForChild("Rarity", 5)
-    if assetsModule then AssetsDir = require(assetsModule).Directory end
-    if rarityModule then RarityDir = require(rarityModule).Rarities end
-end)
+local GameDataTried = false
+-- Pure data modules only, and never at load: required the first time a
+-- feature that needs them is switched on (until then the dropdowns fall
+-- back to the verified field-egg list). Nothing under Controllers is
+-- ever required by this script.
+local function EnsureGameData()
+    if GameDataTried then return end
+    GameDataTried = true
+    pcall(function()
+        local dataFolder = ReplicatedStorage:WaitForChild("Data", 10)
+        local assetsModule = dataFolder and dataFolder:WaitForChild("Assets", 5)
+        local rarityModule = dataFolder and dataFolder:WaitForChild("Rarity", 5)
+        if assetsModule then AssetsDir = require(assetsModule).Directory end
+        if rarityModule then RarityDir = require(rarityModule).Rarities end
+    end)
+end
 
 local CategoryRarity = {}
 local function RarityOf(category)
@@ -782,6 +837,27 @@ local function RefreshSnapshot()
         return true
     end
     return false
+end
+
+-- The game's own client never calls AskFieldEggSnapshot unprompted, so
+-- this script must not either - not at load, not on respawn. The egg
+-- list builds itself from the passive S->C events; if a steal feature
+-- still wants the snapshot, it fires ONCE per session, only after the
+-- user switched that feature on, never earlier than SNAPSHOT_MIN_WAIT
+-- seconds after load. One pcall, no retry loop.
+local SnapshotScheduled = false
+local function MaybeSnapshotEggs()
+    if Runtime.SnapshotDone or SnapshotScheduled then return end
+    SnapshotScheduled = true
+    EnsureGameData()
+    task.spawn(function()
+        local waitLeft = SNAPSHOT_MIN_WAIT - (os.clock() - Runtime.StartAt)
+        if waitLeft > 0 then task.wait(waitLeft) end
+        SnapshotScheduled = false
+        if not Runtime.Alive or Runtime.SnapshotDone then return end
+        Runtime.SnapshotDone = true
+        pcall(RefreshSnapshot)
+    end)
 end
 
 local function BuildRarityOptions()
@@ -1445,6 +1521,7 @@ local function PickEgg()
 end
 
 local function StealEngineTick()
+    if InStartupGrace() then return end
     local mode = nil
     if FlagOn("AutoHelpFriend") then
         mode = "friend"
@@ -1517,6 +1594,7 @@ local function SetAntiRagdoll(on)
 end
 
 local function AntiRagdollTick()
+    if InStartupGrace() then return end
     if not Runtime.AntiRagdollOn then return end
     local okAR, errAR = pcall(function()
         local char, hum, root = Char()
@@ -1663,6 +1741,7 @@ end
 --==============================================================
 
 local function AutoSellTick()
+    if InStartupGrace() then return end
     if not (FlagOn("AutoSellEggs") or FlagOn("AutoSellPets")) then return end
     if Runtime.HopBusy then return end
     local eggFilter = FlagSet("SellEggRarity")
@@ -1697,6 +1776,7 @@ end
 --==============================================================
 
 local function AutoPlaceTick()
+    if InStartupGrace() then return end
     if not FlagOn("AutoPlaceEgg") then return end
     if Runtime.Busy or Runtime.Carry.IsCarrying or Runtime.HopBusy then return end
     if os.clock() < Runtime.PlacePauseUntil then return end
@@ -1739,6 +1819,7 @@ end
 --==============================================================
 
 local function AutoHatchTick()
+    if InStartupGrace() then return end
     if not FlagOn("AutoHatch") then return end
     if Runtime.HopBusy then return end
     local now = os.clock()
@@ -1854,35 +1935,44 @@ local function OnButterflyBloom(...)
     FeatureInvoke("AutoButterfly", Net("RF", "Butterflies/AskSwing"), flightId)
 end
 
-local function TryConnectButterflies()
-    if Runtime.Butterfly.Connected then return end
-    local okCtl, controller = pcall(function()
-        local controllers = ReplicatedStorage:WaitForChild("Controllers", 5)
-        local gameCtl = controllers and controllers:WaitForChild("Game", 5)
-        local module = gameCtl and gameCtl:FindFirstChild("AdminAbuseClientController")
-        return module and require(module)
-    end)
-    if not okCtl or type(controller) ~= "table" then return end
-    local events = controller.Events
-    if type(events) ~= "table" then return end
-    local bloom = events.ButterflyBloom
-    if typeof(bloom) == "Instance" and bloom:IsA("BindableEvent") then
-        Track(bloom.Event:Connect(OnButterflyBloom))
-        Runtime.Butterfly.Connected = true
-    elseif type(bloom) == "table" and type(bloom.Connect) == "function" then
-        Track(bloom:Connect(OnButterflyBloom))
-        Runtime.Butterfly.Connected = true
+-- Passive listening on the game's own Butterflies remotes, connected
+-- ONLY while the toggle is on - no controller require, no polling
+-- supervisor, nothing at load. The Data.Butterflies module (pure data)
+-- is read lazily, inside a pcall, for net reach / swing cooldown.
+local function SetButterflyWatch(on)
+    for _, conn in Runtime.ButterflyConns do
+        pcall(function() conn:Disconnect() end)
     end
-    local okCfg, cfg = pcall(function()
-        local dataFolder = ReplicatedStorage:WaitForChild("Data", 5)
-        local bf = dataFolder and dataFolder:FindFirstChild("Butterflies")
-        return bf and require(bf)
+    Runtime.ButterflyConns = {}
+    Runtime.Butterfly.Connected = false
+    if not on then return end
+    task.spawn(function()
+        local okCfg, cfg = pcall(function()
+            local dataFolder = ReplicatedStorage:WaitForChild("Data", 5)
+            local bf = dataFolder and dataFolder:FindFirstChild("Butterflies")
+            return bf and require(bf)
+        end)
+        if okCfg and type(cfg) == "table" then
+            local realCfg = cfg.Configs or cfg.Config or cfg
+            Runtime.Butterfly.NetReach = tonumber(realCfg.NetReach) or Runtime.Butterfly.NetReach
+            Runtime.Butterfly.Cooldown = tonumber(realCfg.SwingCooldownSeconds) or Runtime.Butterfly.Cooldown
+        end
     end)
-    if okCfg and type(cfg) == "table" then
-        local realCfg = cfg.Configs or cfg.Config or cfg
-        Runtime.Butterfly.NetReach = tonumber(realCfg.NetReach) or Runtime.Butterfly.NetReach
-        Runtime.Butterfly.Cooldown = tonumber(realCfg.SwingCooldownSeconds) or Runtime.Butterfly.Cooldown
-    end
+    pcall(function()
+        if not NetRoot then return end
+        local folder = NetRoot:FindFirstChild("Butterflies")
+        if not folder then return end
+        for _, node in folder:GetChildren() do
+            if node:IsA("RemoteEvent") or node:IsA("UnreliableRemoteEvent") then
+                local conn = node.OnClientEvent:Connect(function(...)
+                    local okEv, errEv = pcall(OnButterflyBloom, ...)
+                    if not okEv then warn("[RageHub:Butterflies] " .. tostring(errEv)) end
+                end)
+                Runtime.ButterflyConns[#Runtime.ButterflyConns + 1] = conn
+            end
+        end
+        Runtime.Butterfly.Connected = #Runtime.ButterflyConns > 0
+    end)
 end
 
 --==============================================================
@@ -1890,6 +1980,7 @@ end
 --==============================================================
 
 local function AutoBestPetTick()
+    if InStartupGrace() then return end
     if not FlagOn("AutoBestPet") then return end
     if Runtime.HopBusy then return end
     local inv = Runtime.Profile.Inventory
@@ -1904,6 +1995,7 @@ local function AutoBestPetTick()
 end
 
 local function AutoClaimTick()
+    if InStartupGrace() then return end
     if not FlagOn("AutoClaim") then return end
     if Runtime.HopBusy then return end
     FeatureInvoke("AutoClaim", Net("RF", "AwayEarnings/AskCollect"), { Kind = "Claim" })
@@ -1911,6 +2003,7 @@ local function AutoClaimTick()
 end
 
 local function AutoUpgradeTreadmillTick()
+    if InStartupGrace() then return end
     if not FlagOn("AutoUpgradeTreadmill") then return end
     if Runtime.HopBusy then return end
     local money = Runtime.Profile.Money
@@ -1935,6 +2028,7 @@ local function AutoUpgradeTreadmillTick()
 end
 
 local function AutoBuyTrailTick()
+    if InStartupGrace() then return end
     if not FlagOn("AutoBuyTrail") then return end
     if Runtime.HopBusy then return end
     local money = Runtime.Profile.Money
@@ -1965,17 +2059,26 @@ end
 -- MISC · Anti AFK  (virtual input; never fires Telemetry/IdleRescue)
 --==============================================================
 
-local function SetupAntiAfk()
-    Track(LocalPlayer.Idled:Connect(function()
+-- Connected only while the toggle is on (it defaults to on, matching
+-- the builds that loaded clean - the Idled listener is client-local
+-- and listens to the game's own signal).
+local function SetAntiAfk(on)
+    if Runtime.AfkConn then
+        pcall(function() Runtime.AfkConn:Disconnect() end)
+        Runtime.AfkConn = nil
+    end
+    if not on then return end
+    Runtime.AfkConn = LocalPlayer.Idled:Connect(function()
         pcall(function()
             local virtualUser = game:GetService("VirtualUser")
             virtualUser:CaptureController()
             virtualUser:ClickButton1(Vector2.new())
         end)
-    end))
+    end)
 end
 
 local function AntiAfkTick()
+    if InStartupGrace() then return end
     if not FlagOn("AntiAfk") then return end
     pcall(function()
         local uis = game:GetService("UserInputService")
@@ -2018,20 +2121,26 @@ local function Rejoin()
     end)
 end
 
-local function SetupReconnect()
-    Track(GuiService.ErrorMessageChanged:Connect(function()
+local function SetReconnect(on)
+    for _, conn in Runtime.ReconnectConns do
+        pcall(function() conn:Disconnect() end)
+    end
+    Runtime.ReconnectConns = {}
+    if not on then return end
+    local conns = Runtime.ReconnectConns
+    conns[#conns + 1] = GuiService.ErrorMessageChanged:Connect(function()
         if not FlagOn("AutoReconnect") then return end
         if GuiService:GetErrorMessage() == "" then return end
         task.wait(1)
         Rejoin()
-    end))
+    end)
     local networkClient = game:GetService("NetworkClient")
-    Track(networkClient.ChildRemoved:Connect(function()
+    conns[#conns + 1] = networkClient.ChildRemoved:Connect(function()
         if not FlagOn("AutoReconnect") then return end
         task.wait(1)
         Rejoin()
-    end))
-    Track(TeleportService.TeleportInitFailed:Connect(function()
+    end)
+    conns[#conns + 1] = TeleportService.TeleportInitFailed:Connect(function()
         if not FlagOn("AutoReconnect") then return end
         if Runtime.ReconnectRetries >= RECONNECT_MAX then return end
         Runtime.ReconnectRetries += 1
@@ -2045,7 +2154,7 @@ local function SetupReconnect()
                 TeleportService:Teleport(game.PlaceId, LocalPlayer)
             end
         end)
-    end))
+    end)
 end
 
 --==============================================================
@@ -2152,6 +2261,9 @@ local function UnloadAll()
     pcall(ReleaseCamera)
     pcall(function() LocalPlayer.ReplicationFocus = nil end)
     pcall(function() SetAntiRagdoll(false) end)
+    pcall(SetAntiAfk, false)
+    pcall(SetReconnect, false)
+    pcall(SetButterflyWatch, false)
     for _, conn in Runtime.Conns do
         pcall(function() conn:Disconnect() end)
     end
@@ -2184,7 +2296,9 @@ local function OnCharacterAdded(char)
             if Runtime.AntiRagdollOn then
                 AntiRagdollBaseline(char)
             end
-            RefreshSnapshot()
+            -- no snapshot here: the egg list keeps building from the
+            -- passive FieldEgg* events; a respawn must never trigger
+            -- a server call by itself
             SetStatus("Respawned - resuming")
         end)
         if not okChar then warn("[RageHub:Char] " .. tostring(errChar)) end
@@ -2197,6 +2311,7 @@ end
 --==============================================================
 
 local function AutoTreadmillTick()
+    if InStartupGrace() then return end
     if not FlagOn("AutoTreadmill") then return end
     if Runtime.Busy or Runtime.Carry.IsCarrying or Runtime.HopBusy then return end
     local tm = Runtime.Treadmill
@@ -2324,7 +2439,7 @@ Window = RageHub:CreateWindow({
     Subtitle = "Steal An Egg - " .. VERSION,
     Theme = "Rage",
     Features = { Notifications = true },
-    ConfigFolder = "RageHub/StealAnEgg",
+    ConfigFolder = CONFIG_FOLDER, -- isolated: no save from an older build ever loads
     AutoSave = Prefs.AutoSave and "autosave" or nil,
     Splash = true,
     OnUnload = UnloadAll,
@@ -2372,7 +2487,11 @@ StealSection:CreateToggle({
     Name = "Instant Steal", Flag = "InstantSteal", Default = false,
     Description = "Tap the game's own Steal button; the script flies the egg straight to the SafeZone",
     Callback = function(on)
-        if not on then CancelMode("manual") end
+        if on then
+            MaybeSnapshotEggs()
+        else
+            CancelMode("manual")
+        end
     end,
 })
 
@@ -2381,10 +2500,10 @@ StealSection:CreateToggle({
     Description = "Steal a matching egg, escape straight to the SafeZone, repeat",
     Callback = function(on)
         if on then
-            task.spawn(function()
-                pcall(RefreshSnapshot)
-                RefreshFilterDropdowns()
-            end)
+            EnsureGameData()
+            RefreshFilterDropdowns()
+            MaybeSnapshotEggs()
+            EnsureSupervisor("StealEngine", 1.0, StealEngineTick)
         else
             CancelMode("safezone")
         end
@@ -2406,13 +2525,20 @@ BiomeDropdown = StealSection:CreateDropdown({
 StealSection:CreateToggle({
     Name = "Auto Treadmill", Flag = "AutoTreadmill", Default = false,
     Description = "Wears YOUR plot's treadmill (no flying - the server relocates you itself)",
+    Callback = function(on)
+        if on then EnsureSupervisor("AutoTreadmill", 1.0, AutoTreadmillTick) end
+    end,
 })
 
 StealSection:CreateToggle({
     Name = "Help Friend (Manual Steal)", Flag = "HelpFriend", Default = false,
     Description = "Your manual steals get dropped at the Forest middle for a friend instead of redeemed",
     Callback = function(on)
-        if not on then CancelMode("manual") end
+        if on then
+            MaybeSnapshotEggs()
+        else
+            CancelMode("manual")
+        end
     end,
 })
 
@@ -2420,7 +2546,12 @@ StealSection:CreateToggle({
     Name = "Auto Help Friend", Flag = "AutoHelpFriend", Default = false,
     Description = "AFK mode: auto-steal matching eggs and drop them at the Forest middle",
     Callback = function(on)
-        if not on then CancelMode("friend") end
+        if on then
+            MaybeSnapshotEggs()
+            EnsureSupervisor("StealEngine", 1.0, StealEngineTick)
+        else
+            CancelMode("friend")
+        end
     end,
 })
 
@@ -2433,6 +2564,7 @@ ProtectSection:CreateToggle({
     Description = "Local anti-fling hygiene: motors, physics junk, launch clamp, player collisions. The 2.5s server ragdoll can still happen",
     Callback = function(on)
         SetAntiRagdoll(on and true or false)
+        if on then EnsureSupervisor("AntiRagdoll", 0.2, AntiRagdollTick) end
     end,
 })
 
@@ -2443,11 +2575,18 @@ local SessionSection = MiscTab:CreateSection("Session")
 SessionSection:CreateToggle({
     Name = "Anti AFK", Flag = "AntiAfk", Default = true,
     Description = "Virtual input every 45s so the game's own idle detector stays quiet",
+    Callback = function(on)
+        SetAntiAfk(on and true or false)
+        if on then EnsureSupervisor("AntiAfk", AFK_INTERVAL, AntiAfkTick) end
+    end,
 })
 
 SessionSection:CreateToggle({
     Name = "Auto Reconnect", Flag = "AutoReconnect", Default = false,
     Description = "Rejoins after a kick or disconnect (up to 8 tries)",
+    Callback = function(on)
+        SetReconnect(on and true or false)
+    end,
 })
 
 SessionSection:CreateToggle({
@@ -2475,11 +2614,25 @@ SellSection:CreateDropdown({
 SellSection:CreateToggle({
     Name = "Sell Eggs", Flag = "AutoSellEggs", Default = false,
     Description = "Every 5s via the satchel's own SellSelection remote",
+    Callback = function(on)
+        if on then
+            EnsureGameData()
+            RefreshFilterDropdowns()
+            EnsureSupervisor("AutoSell", SELL_INTERVAL, AutoSellTick)
+        end
+    end,
 })
 
 SellSection:CreateToggle({
     Name = "Sell Pets", Flag = "AutoSellPets", Default = false,
     Description = "Every 5s via the satchel's own SellSelection remote",
+    Callback = function(on)
+        if on then
+            EnsureGameData()
+            RefreshFilterDropdowns()
+            EnsureSupervisor("AutoSell", SELL_INTERVAL, AutoSellTick)
+        end
+    end,
 })
 
 local EggAutoSection = MiscTab:CreateSection("Eggs")
@@ -2487,11 +2640,17 @@ local EggAutoSection = MiscTab:CreateSection("Eggs")
 EggAutoSection:CreateToggle({
     Name = "Auto Place Egg", Flag = "AutoPlaceEgg", Default = false,
     Description = "Wear tool, then place on a free spot of your plot (5+ studs from other eggs)",
+    Callback = function(on)
+        if on then EnsureSupervisor("AutoPlace", PLACE_INTERVAL, AutoPlaceTick) end
+    end,
 })
 
 EggAutoSection:CreateToggle({
     Name = "Auto Hatch Egg", Flag = "AutoHatch", Default = false,
     Description = "Hatch placed eggs: AskHatch, 6.2s, AskFinishHatch (the game's own timing)",
+    Callback = function(on)
+        if on then EnsureSupervisor("AutoHatch", 1.0, AutoHatchTick) end
+    end,
 })
 
 local PetAutoSection = MiscTab:CreateSection("Pets & Events")
@@ -2499,11 +2658,17 @@ local PetAutoSection = MiscTab:CreateSection("Pets & Events")
 PetAutoSection:CreateToggle({
     Name = "Auto Catch Butterfly", Flag = "AutoButterfly", Default = false,
     Description = "Unverified remote shapes - swings the net when a butterfly blooms in reach; chases only while idle",
+    Callback = function(on)
+        SetButterflyWatch(on and true or false)
+    end,
 })
 
 PetAutoSection:CreateToggle({
     Name = "Auto Place Best Pet", Flag = "AutoBestPet", Default = false,
     Description = "Wear best pets whenever new pets appear (every 30s)",
+    Callback = function(on)
+        if on then EnsureSupervisor("AutoBestPet", BESTPET_INTERVAL, AutoBestPetTick) end
+    end,
 })
 
 local EconomySection = MiscTab:CreateSection("Economy")
@@ -2511,16 +2676,25 @@ local EconomySection = MiscTab:CreateSection("Economy")
 EconomySection:CreateToggle({
     Name = "Auto Claim Money", Flag = "AutoClaim", Default = false,
     Description = "Away earnings claim + codex redeem, every 2 minutes",
+    Callback = function(on)
+        if on then EnsureSupervisor("AutoClaim", CLAIM_INTERVAL, AutoClaimTick) end
+    end,
 })
 
 EconomySection:CreateToggle({
     Name = "Auto Upgrade Treadmill", Flag = "AutoUpgradeTreadmill", Default = false,
     Description = "Buys the next treadmill tier when you can afford it",
+    Callback = function(on)
+        if on then EnsureSupervisor("AutoUpgradeTreadmill", UPGRADE_INTERVAL, AutoUpgradeTreadmillTick) end
+    end,
 })
 
 EconomySection:CreateToggle({
     Name = "Auto Buy Trail", Flag = "AutoBuyTrail", Default = false,
     Description = "Buys the most expensive affordable shop trail, then equips it",
+    Callback = function(on)
+        if on then EnsureSupervisor("AutoBuyTrail", BUYTRAIL_INTERVAL, AutoBuyTrailTick) end
+    end,
 })
 
 local ConfigSection = MiscTab:CreateSection("Config")
@@ -2573,47 +2747,27 @@ ServerSection:CreateButton({
 })
 
 local ProfileSection = MiscTab:CreateSection("Low Profile")
-ProfileSection:CreateLabel("No hooks · nothing modified · load is read-only · regions avoided, never bypassed · glide ramps keep movement smooth")
+ProfileSection:CreateLabel("Load calls no remotes · no hooks · isolated config (no old saves) · snapshot only on request, 10 s in · automation waits 15 s · regions avoided, never bypassed")
 
 --==============================================================
--- INIT
+-- INIT  (passive load: window + passive listeners, nothing else)
 --==============================================================
 
 ConnectGameEvents()
-SetupAntiAfk()
-SetupReconnect()
 
 Track(LocalPlayer.CharacterAdded:Connect(OnCharacterAdded))
 if LocalPlayer.Character then
     OnCharacterAdded(LocalPlayer.Character)
 end
 
-Supervisor("StealEngine", 1.0, StealEngineTick)
-Supervisor("AutoTreadmill", 1.0, AutoTreadmillTick)
-Supervisor("AntiRagdoll", 0.2, AntiRagdollTick)
-Supervisor("AutoSell", SELL_INTERVAL, AutoSellTick)
-Supervisor("AutoPlace", PLACE_INTERVAL, AutoPlaceTick)
-Supervisor("AutoHatch", 1.0, AutoHatchTick)
-Supervisor("AutoBestPet", BESTPET_INTERVAL, AutoBestPetTick)
-Supervisor("AutoClaim", CLAIM_INTERVAL, AutoClaimTick)
-Supervisor("AutoUpgradeTreadmill", UPGRADE_INTERVAL, AutoUpgradeTreadmillTick)
-Supervisor("AutoBuyTrail", BUYTRAIL_INTERVAL, AutoBuyTrailTick)
-Supervisor("AntiAfk", AFK_INTERVAL, AntiAfkTick)
-Supervisor("ButterflyWatch", 30, TryConnectButterflies)
-Supervisor("Watchdog", 2, function()
-    for name, entry in Supervisors do
-        if name ~= "Watchdog" and os.clock() - entry.HB > entry.Interval + 6 then
-            entry.HB = os.clock()
-            entry.Restart()
-            warn("[RageHub] supervisor '" .. name .. "' stalled - restarted")
-        end
-    end
-end)
-
-task.spawn(function()
-    pcall(RefreshSnapshot)
-    RefreshFilterDropdowns()
-end)
+-- The only default-ON feature arms its client-local listener now (the
+-- same footprint as the builds that loaded clean). Everything else -
+-- supervisors, remotes, data modules - starts the first time its
+-- toggle is switched on, by a tap or by a restored config.
+if FlagOn("AntiAfk") then
+    SetAntiAfk(true)
+    EnsureSupervisor("AntiAfk", AFK_INTERVAL, AntiAfkTick)
+end
 
 Notify("Rage Hub", "Steal An Egg " .. VERSION .. " loaded.", "success", 3)
 
@@ -2623,6 +2777,5 @@ task.delay(0.35, function()
         RefreshFilterDropdowns()
         Notify("Config", "Saved config restored.", "success", 3)
     end
-    QueueAutoExecute()
     SetStatus("Ready - " .. VERSION)
 end)
