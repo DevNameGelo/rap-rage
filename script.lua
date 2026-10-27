@@ -1,7 +1,9 @@
 --[[
-    RAGE REJOIN HUB v3 (Rayfield)
+    RAGE REJOIN HUB v3.1 (Rayfield)
     Auto Rejoin | Auto Execute | Anti AFK
 ]]
+
+local VERSION = "3.1"
 
 local env = (getgenv and getgenv()) or _G
 if env.__RageRejoinHub and type(env.__RageRejoinHub.Destroy) == "function" then
@@ -52,6 +54,57 @@ local function track(connection)
 end
 
 ---------------------------------------------------------------------
+-- Legacy cleanup (old v1/v2 GUIs and config file)
+---------------------------------------------------------------------
+local function cleanLegacy()
+    local parents = {}
+
+    if type(gethui) == "function" then
+        local ok, result = pcall(gethui)
+        if ok and typeof(result) == "Instance" then
+            parents[#parents + 1] = result
+        end
+    end
+
+    local okCore, coreGui = pcall(function()
+        return game:GetService("CoreGui")
+    end)
+    if okCore and coreGui then
+        parents[#parents + 1] = coreGui
+    end
+
+    local playerGui = player:FindFirstChildOfClass("PlayerGui")
+    if playerGui then
+        parents[#parents + 1] = playerGui
+    end
+
+    for _, parent in ipairs(parents) do
+        pcall(function()
+            for _, child in ipairs(parent:GetChildren()) do
+                if child:IsA("ScreenGui") then
+                    local isV1 = child.Name == "RageRejoinHub"
+                    local isV2 = child:FindFirstChild("FloatingButton") ~= nil
+                        and child:FindFirstChild("MainPanel") ~= nil
+                    if isV1 or isV2 then
+                        child:Destroy()
+                    end
+                end
+            end
+        end)
+    end
+
+    if type(isfile) == "function" and type(delfile) == "function" then
+        pcall(function()
+            if isfile("RageRejoinHub_Config.json") then
+                delfile("RageRejoinHub_Config.json")
+            end
+        end)
+    end
+end
+
+cleanLegacy()
+
+---------------------------------------------------------------------
 -- Load Rayfield
 ---------------------------------------------------------------------
 local okLib, Rayfield = pcall(function()
@@ -64,7 +117,7 @@ if not okLib or not Rayfield then
 end
 
 local Window = Rayfield:CreateWindow({
-    Name = "RAGE REJOIN",
+    Name = "RAGE REJOIN v" .. VERSION,
     LoadingTitle = "Rage Rejoin Hub",
     LoadingSubtitle = "by DevNameGelo",
     DisableRayfieldPrompts = true,
@@ -95,14 +148,19 @@ local function notify(title, content)
 end
 
 ---------------------------------------------------------------------
--- Queue script on teleport
+-- Queue script on teleport (cache-busted so it always loads latest)
 ---------------------------------------------------------------------
 local function queueScript()
     if queued or not config.AutoExecute or type(queueTeleport) ~= "function" then
         return
     end
 
-    local source = string.format('loadstring(game:HttpGet("%s"))()', SETTINGS.ScriptUrl)
+    local source = string.format(
+        'loadstring(game:HttpGet("%s?v=%d"))()',
+        SETTINGS.ScriptUrl,
+        os.time()
+    )
+
     if pcall(queueTeleport, source) then
         queued = true
     end
@@ -276,10 +334,9 @@ local function destroy()
     env.__RageRejoinHub = nil
 end
 
-env.__RageRejoinHub = { Destroy = destroy }
+env.__RageRejoinHub = { Destroy = destroy, Version = VERSION }
 
--- Apply saved toggle values (callbacks sync `config`)
 pcall(function() Rayfield:LoadConfiguration() end)
 
 setStatus("System ready")
-print("[Rage Rejoin Hub] Loaded successfully.")
+print("[Rage Rejoin Hub] v" .. VERSION .. " loaded.")
