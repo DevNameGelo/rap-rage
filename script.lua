@@ -1,7 +1,6 @@
 -- RGC | Rage Gen Core | DevNameGelo
--- File path in repo: script.lua (root)
--- Features (always ON, no toggles): Auto Execute, Auto Rejoin, Anti-AFK
--- Manual buttons: Rejoin, Fake Kick (test)
+-- Always ON: Auto Execute, Auto Rejoin, Anti-AFK, Watchdog (no toggles)
+-- UI: Rage Hub library | "x" = circle | "Hide All" = hide everything, /open to show
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
@@ -10,13 +9,16 @@ if genv.RGC_AUTO_LOADED then return end
 genv.RGC_AUTO_LOADED = true
 
 local SCRIPT_URL = "https://raw.githubusercontent.com/DevNameGelo/rap-rage/refs/heads/main/script.lua"
+local LIB_URL = "https://raw.githubusercontent.com/devnamegelo/Rage-Hub/main/RageHub.lua"
+local SAVE_FILE = "RGC_AutoRejoin.json"
 
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 local GuiService = game:GetService("GuiService")
 local CoreGui = game:GetService("CoreGui")
 local VirtualUser = game:GetService("VirtualUser")
-local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
 
 local LP = Players.LocalPlayer
 while not LP do
@@ -25,122 +27,50 @@ while not LP do
 end
 
 ----------------------------------------------------------------
--- GUI
+-- UI hooks (filled in after the library loads)
 ----------------------------------------------------------------
-local gui = Instance.new("ScreenGui")
-gui.Name = "RGC_AutoRejoin"
-gui.ResetOnSpawn = false
-gui.IgnoreGuiInset = true
-gui.DisplayOrder = 999
-pcall(function()
-	if syn and syn.protect_gui then syn.protect_gui(gui) end
-end)
-local okParent = pcall(function()
-	gui.Parent = (gethui and gethui()) or CoreGui
-end)
-if not okParent or not gui.Parent then
-	gui.Parent = LP:WaitForChild("PlayerGui")
-end
-
-local main = Instance.new("Frame")
-main.Size = UDim2.new(0, 230, 0, 214)
-main.Position = UDim2.new(0, 12, 0.5, -107)
-main.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
-main.BorderSizePixel = 0
-main.Active = true
-main.Parent = gui
-Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
-local stroke = Instance.new("UIStroke", main)
-stroke.Color = Color3.fromRGB(255, 60, 80)
-stroke.Thickness = 1.5
-
-local function label(text, y, size, color, font)
-	local l = Instance.new("TextLabel")
-	l.BackgroundTransparency = 1
-	l.Position = UDim2.new(0, 12, 0, y)
-	l.Size = UDim2.new(1, -24, 0, size)
-	l.Text = text
-	l.TextColor3 = color or Color3.fromRGB(235, 235, 240)
-	l.Font = font or Enum.Font.GothamMedium
-	l.TextSize = 13
-	l.TextXAlignment = Enum.TextXAlignment.Left
-	l.Parent = main
-	return l
-end
-
-label("RGC | Rage Gen Core", 8, 20, Color3.fromRGB(255, 70, 90), Enum.Font.GothamBold)
-
-local green = Color3.fromRGB(70, 230, 120)
-local function featureRow(name, y)
-	local l = label(name, y, 18)
-	local s = Instance.new("TextLabel")
-	s.BackgroundTransparency = 1
-	s.Position = UDim2.new(1, -62, 0, y)
-	s.Size = UDim2.new(0, 50, 0, 18)
-	s.Text = "ON"
-	s.TextColor3 = green
-	s.Font = Enum.Font.GothamBold
-	s.TextSize = 13
-	s.TextXAlignment = Enum.TextXAlignment.Right
-	s.Parent = main
-end
-featureRow("Auto Execute", 36)
-featureRow("Auto Rejoin", 56)
-featureRow("Anti-AFK", 76)
-
-local statusLabel = label("Status: Active", 100, 32, Color3.fromRGB(170, 170, 185), Enum.Font.Gotham)
-statusLabel.TextWrapped = true
-statusLabel.TextYAlignment = Enum.TextYAlignment.Top
-statusLabel.TextSize = 12
+local win, statusLabel, statsLabel
 
 local function setStatus(text)
-	statusLabel.Text = "Status: " .. tostring(text)
+	if statusLabel then
+		pcall(function() statusLabel:Set("Status: " .. tostring(text)) end)
+	end
 end
 
-local function button(text, y, color)
-	local b = Instance.new("TextButton")
-	b.Size = UDim2.new(1, -24, 0, 32)
-	b.Position = UDim2.new(0, 12, 0, y)
-	b.BackgroundColor3 = color
-	b.Text = text
-	b.TextColor3 = Color3.new(1, 1, 1)
-	b.Font = Enum.Font.GothamBold
-	b.TextSize = 14
-	b.AutoButtonColor = true
-	b.Parent = main
-	Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
-	return b
-end
-
-local rejoinBtn = button("Rejoin", 138, Color3.fromRGB(50, 110, 220))
-local fakeKickBtn = button("Fake Kick (Test)", 174, Color3.fromRGB(210, 60, 70))
-
--- Drag (mouse + touch)
-do
-	local dragging, dragStart, startPos
-	main.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1
-			or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = true
-			dragStart = input.Position
-			startPos = main.Position
-			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then dragging = false end
-			end)
-		end
-	end)
-	UserInputService.InputChanged:Connect(function(input)
-		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
-			or input.UserInputType == Enum.UserInputType.Touch) then
-			local d = input.Position - dragStart
-			main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
-				startPos.Y.Scale, startPos.Y.Offset + d.Y)
-		end
-	end)
+local function notify(title, content, kind)
+	if win then
+		pcall(function()
+			win:Notify({ Title = title, Content = content or "", Type = kind or "info", Duration = 4 })
+		end)
+	end
 end
 
 ----------------------------------------------------------------
--- 1) AUTO EXECUTE (re-runs this script after every teleport/rejoin)
+-- SAVE (rejoin counter survives rejoins)
+----------------------------------------------------------------
+local save = { count = 0, pending = false }
+
+pcall(function()
+	if isfile and readfile and isfile(SAVE_FILE) then
+		local d = HttpService:JSONDecode(readfile(SAVE_FILE))
+		if type(d) == "table" then save = d end
+	end
+end)
+
+local function writeSave()
+	pcall(function()
+		if writefile then writefile(SAVE_FILE, HttpService:JSONEncode(save)) end
+	end)
+end
+
+if save.pending then
+	save.count = (save.count or 0) + 1
+	save.pending = false
+	writeSave()
+end
+
+----------------------------------------------------------------
+-- 1) AUTO EXECUTE
 ----------------------------------------------------------------
 local queueFn = queue_on_teleport
 	or (syn and syn.queue_on_teleport)
@@ -150,9 +80,7 @@ local queueFn = queue_on_teleport
 local QUEUE_CODE = 'loadstring(game:HttpGet("' .. SCRIPT_URL .. '"))()'
 
 local function queueScript()
-	if queueFn then
-		pcall(queueFn, QUEUE_CODE)
-	end
+	if queueFn then pcall(queueFn, QUEUE_CODE) end
 end
 
 queueScript()
@@ -167,7 +95,7 @@ LP.OnTeleport:Connect(function(state)
 end)
 
 ----------------------------------------------------------------
--- 2) AUTO REJOIN (disconnect / kick / any error)
+-- 2) AUTO REJOIN
 ----------------------------------------------------------------
 local rejoining = false
 
@@ -175,18 +103,17 @@ local function doRejoin(reason)
 	if rejoining then return end
 	rejoining = true
 	setStatus("Rejoining (" .. tostring(reason) .. ")")
+	notify("Rejoining", tostring(reason), "warning")
 	queueScript()
+	save.pending = true
+	writeSave()
 
 	task.spawn(function()
 		local attempt = 0
 		while true do
 			attempt += 1
 			pcall(function()
-				if #Players:GetPlayers() <= 1 then
-					-- Alone in server: hop to a fresh one of the same place
-					TeleportService:Teleport(game.PlaceId, LP)
-				elseif attempt % 3 == 0 then
-					-- Same-server join keeps failing (full/closed): fall back to any server
+				if #Players:GetPlayers() <= 1 or attempt % 3 == 0 then
 					TeleportService:Teleport(game.PlaceId, LP)
 				else
 					TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LP)
@@ -198,21 +125,17 @@ local function doRejoin(reason)
 	end)
 end
 
--- Automatic detection (ignored while a normal teleport is happening)
 local function onDisconnect(reason)
 	if teleporting then return end
 	doRejoin(reason)
 end
 
 TeleportService.TeleportInitFailed:Connect(function()
-	-- the retry loop above handles it
 	if rejoining then setStatus("Teleport failed, retrying...") end
 end)
 
 GuiService.ErrorMessageChanged:Connect(function(msg)
-	if msg and msg ~= "" then
-		onDisconnect(msg)
-	end
+	if msg and msg ~= "" then onDisconnect(msg) end
 end)
 
 task.spawn(function()
@@ -257,7 +180,6 @@ local function antiAfkPulse()
 end
 
 LP.Idled:Connect(antiAfkPulse)
-
 task.spawn(function()
 	while true do
 		task.wait(55)
@@ -266,18 +188,169 @@ task.spawn(function()
 end)
 
 ----------------------------------------------------------------
--- MANUAL BUTTONS
+-- 4) WATCHDOG (removed from game / stuck with no character)
 ----------------------------------------------------------------
-rejoinBtn.MouseButton1Click:Connect(function()
-	doRejoin("Manual")
+LP.AncestryChanged:Connect(function(_, parent)
+	if not parent then onDisconnect("Removed from game") end
 end)
 
-fakeKickBtn.MouseButton1Click:Connect(function()
-	if rejoining then return end
-	setStatus("Fake kick! Rejoining in 3s...")
-	task.wait(3)
-	-- Same path a real kick/disconnect takes
-	onDisconnect("Fake kick test")
+task.spawn(function()
+	local noChar = 0
+	while true do
+		task.wait(5)
+		if LP.Parent == nil then
+			onDisconnect("Removed from game")
+		end
+		if LP.Character and LP.Character:FindFirstChild("HumanoidRootPart") then
+			noChar = 0
+		else
+			noChar += 5
+			if noChar >= 90 then
+				noChar = 0
+				onDisconnect("Stuck: no character")
+			end
+		end
+	end
 end)
 
-setStatus("Active" .. (queueFn and "" or " (no queue_on_teleport support)"))
+----------------------------------------------------------------
+-- LOW POWER
+----------------------------------------------------------------
+local function setLowPower(on)
+	pcall(function() RunService:Set3dRenderingEnabled(not on) end)
+	pcall(function() if setfpscap then setfpscap(on and 15 or 60) end end)
+	pcall(function()
+		settings().Rendering.QualityLevel = on and Enum.QualityLevel.Level01 or Enum.QualityLevel.Automatic
+	end)
+end
+
+----------------------------------------------------------------
+-- UI (Rage Hub)
+----------------------------------------------------------------
+local okLib, RageHub = pcall(function()
+	return loadstring(game:HttpGet(LIB_URL))()
+end)
+
+if not okLib or type(RageHub) ~= "table" then
+	warn("[RGC] Rage Hub failed to load, running without UI: " .. tostring(RageHub))
+	return
+end
+
+win = RageHub:CreateWindow({
+	Name = "RGC Auto Rejoin",
+	Subtitle = "DevNameGelo | Rage Gen Core",
+	Theme = "Crimson",
+	Width = 460,
+	Height = 340,
+	Launcher = true,
+	Search = false,
+	Splash = { Title = "RGC Auto Rejoin", Subtitle = "Loading...", Duration = 0.8 },
+})
+
+local main = win:CreateTab("Main", "⚡")
+
+local core = main:CreateSection("Always On")
+local green = Color3.fromRGB(52, 211, 153)
+core:CreateLabel("Auto Execute  |  ON"):Set("Auto Execute  |  ON" .. (queueFn and "" or " (no queue_on_teleport)"), green)
+core:CreateLabel("Auto Rejoin  |  ON"):Set("Auto Rejoin  |  ON", green)
+core:CreateLabel("Anti-AFK  |  ON"):Set("Anti-AFK  |  ON", green)
+core:CreateLabel("Watchdog  |  ON"):Set("Watchdog  |  ON", green)
+
+local info = main:CreateSection("Info")
+statsLabel = info:CreateLabel("Uptime 00:00:00  |  Rejoins 0")
+statusLabel = info:CreateLabel("Status: Active")
+
+local ctl = main:CreateSection("Controls")
+
+ctl:CreateButton({
+	Name = "Rejoin",
+	Description = "Rejoin the game now",
+	ButtonText = "Rejoin",
+	Callback = function()
+		doRejoin("Manual")
+	end,
+})
+
+ctl:CreateButton({
+	Name = "Fake Kick (Test)",
+	Description = "Simulates a kick to test auto rejoin",
+	ButtonText = "Test",
+	Callback = function()
+		if rejoining then return end
+		setStatus("Fake kick! Rejoining in 3s...")
+		notify("Fake kick", "Rejoining in 3s...", "error")
+		task.spawn(function()
+			task.wait(3)
+			onDisconnect("Fake kick test")
+		end)
+	end,
+})
+
+ctl:CreateToggle({
+	Name = "Low Power Mode",
+	Description = "3D off, low quality, 15 FPS (saves battery)",
+	Default = false,
+	Callback = function(on)
+		setLowPower(on)
+	end,
+})
+
+local function showPanel()
+	if win._launcher then win._launcher.Visible = true end
+	win:SetVisible(true)
+end
+
+ctl:CreateButton({
+	Name = "Minimize to Circle",
+	Description = "Tap the R circle to reopen (drag it anywhere)",
+	ButtonText = "Hide",
+	Callback = function()
+		win:SetVisible(false)
+	end,
+})
+
+ctl:CreateButton({
+	Name = "Hide All",
+	Description = "Hides window and circle. Type /open in chat to show",
+	ButtonText = "Hide",
+	Callback = function()
+		win:SetVisible(false)
+		if win._launcher then win._launcher.Visible = false end
+		notify("Hidden", "Type /open in chat to show again.", "info")
+	end,
+})
+
+win:CreateSettingsTab("Settings")
+
+-- /open command (new TextChatService + legacy chat)
+pcall(function()
+	local TCS = game:GetService("TextChatService")
+	local cmd = Instance.new("TextChatCommand")
+	cmd.Name = "RGCOpenCommand"
+	cmd.PrimaryAlias = "/open"
+	cmd.SecondaryAlias = "/rgc"
+	cmd.Parent = TCS
+	cmd.Triggered:Connect(showPanel)
+end)
+
+LP.Chatted:Connect(function(msg)
+	msg = string.lower((tostring(msg):gsub("^%s+", ""):gsub("%s+$", "")))
+	if msg == "/open" or msg == "/rgc" then
+		showPanel()
+	end
+end)
+
+-- Uptime + rejoin counter
+local startTime = os.time()
+task.spawn(function()
+	while true do
+		local t = os.time() - startTime
+		pcall(function()
+			statsLabel:Set(string.format("Uptime %02d:%02d:%02d  |  Rejoins %d",
+				math.floor(t / 3600), math.floor(t / 60) % 60, t % 60, save.count or 0))
+		end)
+		task.wait(1)
+	end
+end)
+
+setStatus("Active")
