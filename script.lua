@@ -1,5 +1,4 @@
 
-```lua
 --//==============================================================
 --//  Rage Hub · Steal An Egg · alpha  (Flight Edition) — fixed build
 --//==============================================================
@@ -2853,5 +2852,3 @@ task.delay(0.35, function()
         SetStatus("Ready - " .. VERSION)
     end
 end)
-
-```
