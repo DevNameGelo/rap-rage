@@ -254,8 +254,17 @@ local gui = new("ScreenGui", {
 	ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 999,
 }, parentGui)
 
+local function getViewportSize()
+	-- UserInputService has no GetViewportSize() method. Read the active camera.
+	local camera = workspace.CurrentCamera
+	if camera then
+		return camera.ViewportSize
+	end
+	return Vector2.new(800, 600)
+end
+
 local function responsiveWindowSize()
-	local viewport = UIS:GetViewportSize()
+	local viewport = getViewportSize()
 	local width = math.clamp(viewport.X - 20, 300, 720)
 	local height = math.clamp(viewport.Y - 44, 260, 680)
 	return UDim2.fromOffset(width, height)
@@ -267,12 +276,19 @@ local main = round(new("Frame", {
 }, gui), 12)
 new("UIStroke", {Color = C.accent, Thickness = 1.35, Transparency = 0.25}, main)
 new("UIGradient", {Color = ColorSequence.new({ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 32, 53)), ColorSequenceKeypoint.new(1, Color3.fromRGB(10, 17, 29))}), Rotation = 28}, main)
-UIS:GetPropertyChangedSignal("ViewportSize"):Connect(function()
-	if main and main.Parent then
-		main.Size = responsiveWindowSize()
-		main.Position = UDim2.fromScale(0.5, 0.5)
+local function bindViewportResize()
+	local camera = workspace.CurrentCamera
+	if camera then
+		camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+			if main and main.Parent then
+				main.Size = responsiveWindowSize()
+				main.Position = UDim2.fromScale(0.5, 0.5)
+			end
+		end)
 	end
-end)
+end
+bindViewportResize()
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindViewportResize)
 
 local top = new("Frame", {Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = C.bar, BackgroundTransparency = 0.06, Active = true}, main)
 new("UIGradient", {Color = ColorSequence.new({ColorSequenceKeypoint.new(0, Color3.fromRGB(40, 86, 124)), ColorSequenceKeypoint.new(1, Color3.fromRGB(20, 36, 57))}), Rotation = 0}, top)
