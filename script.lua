@@ -1,3 +1,5 @@
+-- BUILD: fixed2 | getViewportSize() uses workspace.CurrentCamera (no UserInputService:GetViewportSize)
+print("[RGC Glass Creator Studio] loaded build fixed2 - viewport fix active")
 -- RGC Creator Store Browser v2 | DevNameGelo
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
