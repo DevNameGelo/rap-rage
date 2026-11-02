@@ -1,4 +1,3 @@
-
 --[[
     OpenRouter Agent  |  glass chat UI + tool calling + remote spy + stoppable scripts
     Run it, tap the key button, paste your OpenRouter key, save.
