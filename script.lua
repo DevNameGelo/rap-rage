@@ -1,6 +1,6 @@
-print("[RGC Glass Creator Studio] v2.2 loaded - server insert + Bridge tab")
--- RGC Glass Creator Studio v2 | DevNameGelo · RGC
--- AI Agent with real tool calling (Gemini function calling), glass UI, Creator Store browser
+print("[Rage Hub Dev] Beta loaded")
+-- Rage Hub Dev | Beta | DevNameGelo
+-- Creator Store browser + saved collections + AI assistant (chat, coding, script fixing)
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local UIS = game:GetService("UserInputService")
@@ -17,27 +17,28 @@ elseif pcall(function() return game:GetService("CoreGui").Name end) then
 else
 	parentGui = Players.LocalPlayer:WaitForChild("PlayerGui")
 end
-local old = parentGui:FindFirstChild("RGC_CreatorStore")
-if old then old:Destroy() end
+for _, nm in ipairs({"RageHubDev", "RGC_CreatorStore"}) do
+	local old = parentGui:FindFirstChild(nm)
+	if old then old:Destroy() end
+end
 local oldSnd = SoundService:FindFirstChild("RGC_CS_Sound")
 if oldSnd then oldSnd:Destroy() end
 
 -- ===== Config =====
 local CATS = {
-	{name = "Models",     id = 10,  icon = "📦"},
-	{name = "Images",     id = 13,  icon = "🖼"},
-	{name = "Sound FX",   id = 3,   icon = "🔊"},
-	{name = "Music",      id = 300, icon = "🎵"},
-	{name = "Plugins",    id = 38,  icon = "🔌"},
-	{name = "Meshes",     id = 40,  icon = "🔷"},
-	{name = "Animations", id = 24,  icon = "🏃"},
-	{name = "Video",      id = 62,  icon = "🎬"},
-	{name = "Fonts",      id = 73,  icon = "Aa"},
+	{name = "Models",     id = 10},
+	{name = "Images",     id = 13},
+	{name = "Sound FX",   id = 3},
+	{name = "Music",      id = 300},
+	{name = "Plugins",    id = 38},
+	{name = "Meshes",     id = 40},
+	{name = "Animations", id = 24},
+	{name = "Video",      id = 62},
+	{name = "Fonts",      id = 73},
 }
 local TYPE_NAMES = {[1]="Image",[3]="Sound FX",[4]="Mesh",[10]="Model",[13]="Decal",[24]="Animation",[38]="Plugin",[40]="MeshPart",[62]="Video",[73]="Font",[300]="Music"}
-local TYPE_ICONS = {[1]="🖼",[3]="🔊",[4]="🔷",[10]="📦",[13]="🖼",[24]="🏃",[38]="🔌",[40]="🔷",[62]="🎬",[73]="Aa",[300]="🎵"}
+local TYPE_ICONS = {[1]="IMAGE",[3]="SFX",[4]="MESH",[10]="MODEL",[13]="DECAL",[24]="ANIM",[38]="PLUGIN",[40]="MESH",[62]="VIDEO",[73]="FONT",[300]="MUSIC"}
 local PAGE_SIZE = 30
-local DEFAULT_MODEL = "gemini-flash-latest"
 local FILE = "RGC_CreatorStore.json"
 -- Legacy compatibility fallback only; Roblox now recommends the v2 POST search below.
 local MARKET = "https://apis.roblox.com/toolbox-service/v1/marketplace/"
@@ -251,8 +252,8 @@ local function makeCell(parent, id, name, typeId, order)
 		BackgroundColor3 = C.bar, ClipsDescendants = true, BorderSizePixel = 0,
 	}, cell), 9)
 	new("TextLabel", {
-		Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = TYPE_ICONS[typeId] or "📦",
-		TextColor3 = C.sub, TextSize = 28, Font = Enum.Font.GothamBold,
+		Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = TYPE_ICONS[typeId] or "ASSET",
+		TextColor3 = C.sub, TextSize = 11, Font = Enum.Font.GothamBold,
 	}, holder)
 	new("ImageLabel", {
 		Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Fit,
@@ -273,9 +274,99 @@ local function makeCell(parent, id, name, typeId, order)
 	return cell
 end
 
+-- ===== Vector icons (drawn with frames, no emoji) =====
+local function makeIcon(name, parent, px, color)
+	color = color or C.text
+	local root = new("Frame", {Name = "Icon_" .. name, BackgroundTransparency = 1, Size = UDim2.fromOffset(px, px), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5)}, parent)
+	local th = math.max(1.5, px / 11)
+	local lineTh = th * 24 / px
+	local L = {}
+	function L.line(x1, y1, x2, y2)
+		local dx, dy = x2 - x1, y2 - y1
+		local f = new("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale((x1 + x2) / 48, (y1 + y2) / 48),
+			Size = UDim2.fromScale((math.sqrt(dx * dx + dy * dy) + lineTh * 0.6) / 24, lineTh / 24),
+			Rotation = math.deg(math.atan2(dy, dx)), BackgroundColor3 = color, BorderSizePixel = 0,
+		}, root)
+		new("UICorner", {CornerRadius = UDim.new(1, 0)}, f)
+	end
+	function L.ring(cx, cy, r)
+		local f = new("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(cx / 24, cy / 24), Size = UDim2.fromScale(2 * r / 24, 2 * r / 24), BackgroundTransparency = 1, BorderSizePixel = 0}, root)
+		new("UICorner", {CornerRadius = UDim.new(1, 0)}, f)
+		new("UIStroke", {Color = color, Thickness = th, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, f)
+	end
+	function L.dot(cx, cy, r)
+		local f = new("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(cx / 24, cy / 24), Size = UDim2.fromScale(2 * r / 24, 2 * r / 24), BackgroundColor3 = color, BorderSizePixel = 0}, root)
+		new("UICorner", {CornerRadius = UDim.new(1, 0)}, f)
+	end
+	function L.rrect(x, y, w, h, rad, filled)
+		local f = new("Frame", {Position = UDim2.fromScale(x / 24, y / 24), Size = UDim2.fromScale(w / 24, h / 24), BackgroundColor3 = color, BackgroundTransparency = filled and 0 or 1, BorderSizePixel = 0}, root)
+		new("UICorner", {CornerRadius = UDim.new(0, math.max(1, px * rad / 24))}, f)
+		if not filled then new("UIStroke", {Color = color, Thickness = th, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, f) end
+	end
+	local D = {
+		x = function() L.line(6, 6, 18, 18) L.line(18, 6, 6, 18) end,
+		minus = function() L.line(6, 12, 18, 12) end,
+		plus = function() L.line(6, 12, 18, 12) L.line(12, 6, 12, 18) end,
+		expand = function() L.rrect(5, 5, 14, 14, 3) end,
+		search = function() L.ring(10.5, 10.5, 5.5) L.line(14.5, 14.5, 19, 19) end,
+		gear = function()
+			L.ring(12, 12, 3) L.ring(12, 12, 6.5)
+			for i = 0, 7 do
+				local a = math.rad(i * 45)
+				L.line(12 + math.cos(a) * 7.6, 12 + math.sin(a) * 7.6, 12 + math.cos(a) * 10, 12 + math.sin(a) * 10)
+			end
+		end,
+		send = function() L.line(4, 12, 19, 12) L.line(13, 6, 19, 12) L.line(13, 18, 19, 12) end,
+		stop = function() L.rrect(6, 6, 12, 12, 2.5, true) end,
+		trash = function()
+			L.line(5, 7, 19, 7) L.line(9.5, 4.5, 14.5, 4.5)
+			L.rrect(7, 9, 10, 11, 2)
+			L.line(10.5, 12, 10.5, 17) L.line(13.5, 12, 13.5, 17)
+		end,
+		copy = function() L.rrect(9, 9, 10, 10, 2) L.rrect(5, 5, 10, 10, 2) end,
+		bag = function()
+			L.rrect(5, 9, 14, 11, 3)
+			L.line(9, 9, 9, 7) L.line(15, 9, 15, 7) L.line(9, 7, 15, 7)
+		end,
+		bookmark = function()
+			L.line(7, 4, 7, 20) L.line(17, 4, 17, 20) L.line(7, 4, 17, 4)
+			L.line(7, 20, 12, 15) L.line(17, 20, 12, 15)
+		end,
+		chat = function()
+			L.rrect(4, 5, 16, 11, 3)
+			L.line(9, 17, 9, 20.5) L.line(9, 20.5, 13, 16.5)
+		end,
+		chevron = function() L.line(9, 5, 16, 12) L.line(16, 12, 9, 19) end,
+		check = function() L.line(5, 12, 10, 17) L.line(10, 17, 19, 7) end,
+		dot = function() L.dot(12, 12, 5) end,
+	}
+	if D[name] then D[name]() end
+	return root
+end
+local function setIconColor(root, color)
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("UIStroke") then d.Color = color
+		elseif d:IsA("Frame") and d.BackgroundTransparency < 1 then d.BackgroundColor3 = color end
+	end
+end
+local function iconBtn(parent, iconName, text, size, pos, color, ts, px)
+	local b = btn(parent, text, size, pos, color, ts)
+	px = px or 14
+	local holder
+	if text ~= "" then
+		new("UIPadding", {PaddingLeft = UDim.new(0, px + 10)}, b)
+		holder = new("Frame", {BackgroundTransparency = 1, Size = UDim2.fromOffset(px, px), Position = UDim2.new(0, 10, 0.5, -px / 2)}, b)
+	else
+		holder = new("Frame", {BackgroundTransparency = 1, Size = UDim2.fromOffset(px, px), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5)}, b)
+	end
+	local ic = makeIcon(iconName, holder, px, b.TextColor3)
+	return b, ic
+end
+
 -- ===== Root GUI =====
 local gui = new("ScreenGui", {
-	Name = "RGC_CreatorStore", ResetOnSpawn = false, IgnoreGuiInset = true,
+	Name = "RageHubDev", ResetOnSpawn = false, IgnoreGuiInset = true,
 	ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 999,
 }, parentGui)
 
@@ -318,23 +409,32 @@ new("UIGradient", {
 local top = new("Frame", {Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = C.bar, BackgroundTransparency = 0.35, Active = true, BorderSizePixel = 0}, main)
 new("UIGradient", {Color = ColorSequence.new(Color3.fromRGB(70, 120, 190), Color3.fromRGB(40, 30, 90)), Rotation = 0, Transparency = NumberSequence.new(0.45, 0.7)}, top)
 local logo = round(new("TextLabel", {
-	Size = UDim2.fromOffset(40, 24), Position = UDim2.fromOffset(8, 7), BackgroundColor3 = C.accent,
-	Text = "RGC", TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBlack, TextSize = 12, BorderSizePixel = 0,
+	Size = UDim2.fromOffset(34, 24), Position = UDim2.fromOffset(8, 7), BackgroundColor3 = C.accent,
+	Text = "RH", TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBlack, TextSize = 12, BorderSizePixel = 0,
 }, top), 12)
 new("UIGradient", {Color = ColorSequence.new(C.accent, C.accent2), Rotation = 30}, logo)
-new("TextLabel", {
-	Size = UDim2.new(1, -250, 1, 0), Position = UDim2.fromOffset(56, 0), BackgroundTransparency = 1,
-	Text = "Glass Creator Studio", TextColor3 = C.text, Font = Enum.Font.GothamBold,
-	TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
-}, top)
-local function topBtn(txt, xOff, color)
-	local b = btn(top, txt, UDim2.fromOffset(30, 26), UDim2.new(1, xOff, 0.5, -13), color, 12)
+local titleRow = new("Frame", {Size = UDim2.new(1, -250, 1, 0), Position = UDim2.fromOffset(50, 0), BackgroundTransparency = 1}, top)
+new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, titleRow)
+local titleLbl = new("TextLabel", {
+	Size = UDim2.fromOffset(0, 20), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1,
+	Text = "Rage Hub Dev", TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14, LayoutOrder = 1,
+}, titleRow)
+local betaBadge = round(new("TextLabel", {
+	Size = UDim2.fromOffset(38, 16), BackgroundColor3 = C.accent2, Text = "BETA", TextColor3 = Color3.new(1, 1, 1),
+	Font = Enum.Font.GothamBold, TextSize = 9, BorderSizePixel = 0, LayoutOrder = 2,
+}, titleRow), 8)
+local function topBtn(txt, xOff, color, iconName)
+	local b = btn(top, iconName and "" or txt, UDim2.fromOffset(30, 26), UDim2.new(1, xOff, 0.5, -13), color, 12)
 	b.ZIndex = 3
+	if iconName then
+		local holder = new("Frame", {BackgroundTransparency = 1, Size = UDim2.fromOffset(14, 14), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5)}, b)
+		makeIcon(iconName, holder, 14, C.text)
+	end
 	return b
 end
-local btnClose = topBtn("X", -38, C.bad)
-local btnExpand = topBtn("[]", -72)
-local btnCollapse = topBtn("-", -106)
+local btnClose = topBtn("X", -38, C.bad, "x")
+local btnExpand = topBtn("[]", -72, nil, "expand")
+local btnCollapse = topBtn("-", -106, nil, "minus")
 local btnLandscape = topBtn("LS", -140, C.accent)
 local btnReverse = topBtn("RV", -174)
 
@@ -380,7 +480,7 @@ end
 
 local bubble = round(new("TextButton", {
 	Size = UDim2.fromOffset(50, 50), Position = UDim2.new(0, 12, 0.5, -25),
-	BackgroundColor3 = C.accent, Text = "RGC", TextColor3 = Color3.new(1, 1, 1),
+	BackgroundColor3 = C.accent, Text = "RH", TextColor3 = Color3.new(1, 1, 1),
 	Font = Enum.Font.GothamBlack, TextSize = 13, Visible = false, AutoButtonColor = false, BorderSizePixel = 0,
 }, gui), 25)
 new("UIGradient", {Color = ColorSequence.new(C.accent, C.accent2), Rotation = 30}, bubble)
@@ -430,14 +530,11 @@ end
 btnExpand.MouseButton1Click:Connect(function()
 	expanded = not expanded
 	collapsed = false
-	btnCollapse.Text = "-"
 	main.Position = UDim2.fromScale(0.5, 0.5)
-	btnExpand.Text = expanded and "][" or "[]"
 	apply()
 end)
 btnCollapse.MouseButton1Click:Connect(function()
 	collapsed = not collapsed
-	btnCollapse.Text = collapsed and "+" or "-"
 	apply()
 end)
 btnClose.MouseButton1Click:Connect(function()
@@ -458,222 +555,6 @@ end
 hookCamera()
 Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function() hookCamera() apply() end)
 
-
--- ===== Server bridge (remotes) =====
--- An executor only runs on the client. Anything created here is invisible to the server.
--- To make REAL changes we call the game's own remotes (Studio Lite has them).
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
-local function instPath(inst)
-	if inst == game then return "game" end
-	local parts, cur = {}, inst
-	while cur and cur ~= game do
-		table.insert(parts, 1, cur.Name)
-		cur = cur.Parent
-	end
-	if cur ~= game then return "(detached)/" .. table.concat(parts, "/") end
-	return table.concat(parts, "/")
-end
-
--- Values <-> JSON-friendly tagged values ("v3:1,2,3", "inst:Workspace/Part", ...)
-local function toTagged(v, depth)
-	depth = depth or 0
-	local t = typeof(v)
-	if t == "string" or t == "number" or t == "boolean" then return v end
-	if t == "nil" then return "nil:" end
-	if t == "Vector3" then return ("v3:%g,%g,%g"):format(v.X, v.Y, v.Z) end
-	if t == "Vector2" then return ("v2:%g,%g"):format(v.X, v.Y) end
-	if t == "Color3" then return ("c3:%d,%d,%d"):format(math.round(v.R * 255), math.round(v.G * 255), math.round(v.B * 255)) end
-	if t == "CFrame" then
-		local c = {v:GetComponents()}
-		for i, n in ipairs(c) do c[i] = ("%g"):format(n) end
-		return "cf:" .. table.concat(c, ",")
-	end
-	if t == "Instance" then return "inst:" .. instPath(v) end
-	if t == "EnumItem" then return "enum:" .. tostring(v) end
-	if t == "table" then
-		if depth >= 3 then return "<table too deep>" end
-		local out, n, isArray = {}, 0, true
-		for k in pairs(v) do
-			n += 1
-			if type(k) ~= "number" then isArray = false end
-		end
-		if n > 40 then return "<table with " .. n .. " entries>" end
-		if isArray then
-			for i = 1, #v do out[i] = toTagged(v[i], depth + 1) end
-		else
-			for k, x in pairs(v) do out[tostring(k)] = toTagged(x, depth + 1) end
-		end
-		return out
-	end
-	return "<" .. t .. ">"
-end
-local function numsIn(s)
-	local t = {}
-	for n in tostring(s):gmatch("[-+]?%d*%.?%d+") do table.insert(t, tonumber(n)) end
-	return t
-end
-local resolveForTag -- set later (needs path resolver)
-local function fromTagged(v)
-	if type(v) == "string" then
-		if v == "nil:" then return nil end
-		local p = v:sub(1, 3)
-		local rest = v:sub(4)
-		if p == "v3:" then local n = numsIn(rest) return Vector3.new(n[1] or 0, n[2] or 0, n[3] or 0) end
-		if p == "v2:" then local n = numsIn(rest) return Vector2.new(n[1] or 0, n[2] or 0) end
-		if p == "c3:" then local n = numsIn(rest) return Color3.fromRGB(n[1] or 0, n[2] or 0, n[3] or 0) end
-		if p == "cf:" then
-			local n = numsIn(rest)
-			if #n == 12 then return CFrame.new(unpack(n)) end
-			return CFrame.new(n[1] or 0, n[2] or 0, n[3] or 0)
-		end
-		if v:sub(1, 5) == "inst:" then
-			local inst = resolveForTag and resolveForTag(v:sub(6))
-			return inst
-		end
-		return v
-	elseif type(v) == "table" then
-		local out = {}
-		for k, x in pairs(v) do out[k] = fromTagged(x) end
-		return out
-	end
-	return v
-end
-local function jsonOf(v)
-	local ok, s = pcall(HttpService.JSONEncode, HttpService, v)
-	return ok and s or tostring(v)
-end
-local function argsToJson(args, n)
-	local list = {}
-	for i = 1, n do list[i] = toTagged(args[i], 0) end
-	return jsonOf(list)
-end
-
-local spy = {on = false, ignore = false, hooked = false, log = {}, onLog = nil}
-function spy.install()
-	if spy.hooked then return true end
-	if not (hookmetamethod and getnamecallmethod) then
-		return false, "Your executor has no hookmetamethod/getnamecallmethod, so it cannot record remote calls."
-	end
-	local okH, errH = pcall(function()
-		local old
-		local function hook(self, ...)
-			local method = getnamecallmethod()
-			if spy.on and not spy.ignore and (method == "FireServer" or method == "InvokeServer") then
-				local okC, cn = pcall(function() return self.ClassName end)
-				if okC and (cn == "RemoteEvent" or cn == "RemoteFunction" or cn == "UnreliableRemoteEvent") then
-					local n = select("#", ...)
-					local args = {...}
-					task.defer(function()
-						local okE, entry = pcall(function()
-							return {remote = instPath(self), class = cn, method = method, args = argsToJson(args, n), t = os.clock()}
-						end)
-						if okE then
-							local last = spy.log[#spy.log]
-							if last and last.remote == entry.remote and last.args == entry.args and entry.t - last.t < 0.4 then
-								last.count = (last.count or 1) + 1
-								last.t = entry.t
-							else
-								entry.count = 1
-								table.insert(spy.log, entry)
-								if #spy.log > 300 then table.remove(spy.log, 1) end
-							end
-							if spy.onLog then pcall(spy.onLog) end
-						end
-					end)
-				end
-			end
-			if setnamecallmethod then pcall(setnamecallmethod, method) end
-			return old(self, ...)
-		end
-		old = hookmetamethod(game, "__namecall", newcclosure and newcclosure(hook) or hook)
-	end)
-	if not okH then return false, "Hook failed: " .. tostring(errH) end
-	spy.hooked = true
-	return true
-end
-function spy.fmt(e)
-	local s = e.method .. "  " .. e.remote .. "  " .. e.args
-	if (e.count or 1) > 1 then s = s .. "   x" .. e.count end
-	return s
-end
-function spy.text(limit)
-	local lines = {}
-	local from = math.max(1, #spy.log - (limit or 60) + 1)
-	for i = from, #spy.log do lines[#lines + 1] = spy.fmt(spy.log[i]) end
-	return table.concat(lines, "\n")
-end
-
-local function callRemote(remote, method, args, n)
-	spy.ignore = true
-	local res = table.pack(pcall(function()
-		if method == "invoke" then
-			return remote:InvokeServer(table.unpack(args, 1, n))
-		end
-		remote:FireServer(table.unpack(args, 1, n))
-		return nil
-	end))
-	spy.ignore = false
-	return res
-end
-
-local function isRemote(o)
-	return o:IsA("RemoteEvent") or o:IsA("RemoteFunction") or o:IsA("UnreliableRemoteEvent")
-end
-local function scanRemotes(root, limit)
-	local out = {}
-	root = root or ReplicatedStorage
-	local okD, desc = pcall(root.GetDescendants, root)
-	if not okD then return out end
-	for _, d in ipairs(desc) do
-		if isRemote(d) then
-			table.insert(out, {path = instPath(d), class = d.ClassName})
-			if #out >= (limit or 200) then break end
-		end
-	end
-	table.sort(out, function(a, b) return a.path < b.path end)
-	return out
-end
-
--- Studio Lite's own model loader: Clear then Load (both RemoteFunctions). Inserts on the SERVER.
-local function serverInsertAsset(id)
-	local folder = ReplicatedStorage:FindFirstChild("StudioLiteFolder")
-	local clear = folder and folder:FindFirstChild("ClearAssetModelToPlayerGuiServerFunction")
-	local load = folder and folder:FindFirstChild("LoadAssetModelToPlayerGuiServerFunction")
-	if not (clear and load) then return false, "Studio Lite remotes not found in ReplicatedStorage.StudioLiteFolder" end
-	local lp = Players.LocalPlayer
-	local function snapshot()
-		local s = {}
-		local function add(root, label_)
-			if root then
-				for _, c in ipairs(root:GetChildren()) do s[c] = label_ end
-			end
-		end
-		add(Workspace, "Workspace")
-		add(lp and lp:FindFirstChildOfClass("PlayerGui"), "PlayerGui")
-		return s
-	end
-	local before = snapshot()
-	local sid = tostring(id)
-	spy.ignore = true
-	local okC = pcall(function() return clear:InvokeServer(sid) end)
-	local okL, resL = pcall(function() return load:InvokeServer(sid) end)
-	spy.ignore = false
-	if not okL then return false, tostring(resL) end
-	task.wait(1.2)
-	local found = {}
-	local function scan(root, label_)
-		if not root then return end
-		for _, c in ipairs(root:GetChildren()) do
-			if not before[c] and not c:IsDescendantOf(gui) then table.insert(found, {name = c.Name, where = label_}) end
-		end
-	end
-	scan(Workspace, "Workspace")
-	scan(lp and lp:FindFirstChildOfClass("PlayerGui"), "PlayerGui")
-	return true, found, resL, okC
-end
-
-local aiPrefill, gotoTab
 -- ===== Favorites / collections =====
 local activeCol = "Default"
 local function isFav(id, col)
@@ -738,12 +619,6 @@ end
 
 -- ===== Detail popup =====
 local refreshSaved
-local projectRoot = Workspace:FindFirstChild("RGC_Project")
-if not projectRoot then
-	projectRoot = Instance.new("Folder")
-	projectRoot.Name = "RGC_Project"
-	projectRoot.Parent = Workspace
-end
 local curItem = nil
 
 local detail = new("Frame", {
@@ -763,7 +638,7 @@ local dHolder = round(new("Frame", {
 new("UIAspectRatioConstraint", {AspectRatio = 1, AspectType = Enum.AspectType.FitWithinMaxSize}, dHolder)
 local dIcon = new("TextLabel", {
 	Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", TextColor3 = C.sub,
-	TextSize = 40, Font = Enum.Font.GothamBold,
+	TextSize = 14, Font = Enum.Font.GothamBold,
 }, dHolder)
 local dImg = new("ImageLabel", {
 	Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Fit, Image = "",
@@ -789,8 +664,7 @@ local bCopyLua = dBtn("Copy Lua snippet", 5)
 local bCol = dBtn("Collection: Default", 6)
 local bSave = dBtn("Save", 7)
 bPlay = dBtn("Play audio", 8)
-local bInsert = dBtn("Insert to Workspace", 9, C.good)
-local bClose = btn(dCard, "X", UDim2.fromOffset(28, 26), UDim2.new(1, -34, 0, 4), C.accent, 13)
+local bClose = iconBtn(dCard, "x", "", UDim2.fromOffset(28, 26), UDim2.new(1, -34, 0, 4), C.accent, 13, 12)
 
 local function refreshSaveBtn()
 	if not curItem then return end
@@ -804,7 +678,7 @@ local function openDetail(m)
 	curItem = m
 	dTitle.Text = m.name or ("Asset " .. tostring(m.id))
 	dMeta.Text = ("ID %s | %s%s"):format(tostring(m.id), TYPE_NAMES[m.typeId] or "Asset", m.creator and (" | by " .. m.creator) or "")
-	dIcon.Text = TYPE_ICONS[m.typeId] or "📦"
+	dIcon.Text = TYPE_ICONS[m.typeId] or "ASSET"
 	dImg.Image = ("rbxthumb://type=Asset&id=%s&w=420&h=420"):format(tostring(m.id))
 	bPlay.Visible = isAudio(m.typeId)
 	bPlay.Text = "Play audio"
@@ -832,118 +706,6 @@ bSave.MouseButton1Click:Connect(function()
 	refreshSaveBtn()
 	if refreshSaved then refreshSaved() end
 end)
-bInsert.MouseButton1Click:Connect(function()
-	if not curItem then return end
-	local item = curItem
-	local id, typeId = tonumber(item.id), tonumber(item.typeId)
-	if not id then showToast("Invalid asset ID") return end
-	-- Real SERVER-side insert through Studio Lite's own remotes (Clear, then Load)
-	if typeId ~= 38 then
-		showToast("Inserting on server...")
-		local okS, found = serverInsertAsset(id)
-		if okS then
-			detail.Visible = false
-			if #found > 0 then
-				showToast("Inserted on server: " .. tostring(found[1].name):sub(1, 22) .. " (" .. found[1].where .. ")")
-			else
-				showToast("Server accepted the insert. Check Studio Lite's Dex / Workspace.")
-			end
-			return
-		end
-		showToast("Server insert failed (" .. tostring(found):sub(1, 50) .. "). Inserting locally only.")
-		task.wait(1.8)
-	end
-	local lp = Players.LocalPlayer
-	local hrp = lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
-	local target = hrp and (hrp.Position + hrp.CFrame.LookVector * 14) or Vector3.new(0, 10, 0)
-	local groundY = hrp and (hrp.Position.Y - 3) or 0
-	local function disableImportedScripts(root)
-		local function off(o)
-			if o:IsA("LuaSourceContainer") then
-				pcall(function() o.Disabled = true end)
-				pcall(function() o.Enabled = false end)
-			end
-		end
-		off(root)
-		for _, child in ipairs(root:GetDescendants()) do off(child) end
-	end
-	local function place(obj)
-		obj.Parent = Workspace
-		if obj.Parent ~= Workspace then error("Roblox refused to put it in Workspace") end
-		if obj:IsA("Model") then
-			pcall(function()
-				obj:PivotTo(CFrame.new(target))
-				local cf, size = obj:GetBoundingBox()
-				obj:PivotTo(obj:GetPivot() + Vector3.new(0, groundY - (cf.Position.Y - size.Y / 2), 0))
-			end)
-		elseif obj:IsA("BasePart") then
-			obj.Position = target
-		end
-		return obj
-	end
-	local function makePart()
-		local p = Instance.new("Part")
-		p.Name = item.name or "ImportedAsset"
-		p.Anchored = true
-		p.Size = Vector3.new(4, 1, 4)
-		p.Position = target + Vector3.new(0, 2, 0)
-		return p
-	end
-	local KNOWN = {[3] = true, [300] = true, [13] = true, [1] = true, [40] = true, [4] = true, [24] = true, [62] = true, [38] = true}
-	local placed = nil
-	local ok, msg = pcall(function()
-		if typeId == 3 or typeId == 300 then
-			local snd = Instance.new("Sound")
-			snd.Name = item.name or "ImportedAudio"
-			snd.SoundId = "rbxassetid://" .. id
-			snd.Volume = 1
-			placed = place(snd)
-		elseif typeId == 13 or typeId == 1 then
-			local part = makePart()
-			local decal = Instance.new("Decal")
-			decal.Name = "ImportedDecal"; decal.Texture = "rbxassetid://" .. id
-			decal.Face = Enum.NormalId.Top; decal.Parent = part
-			placed = place(part)
-		elseif typeId == 40 or typeId == 4 then
-			local part = makePart()
-			local mesh = Instance.new("SpecialMesh")
-			mesh.MeshType = Enum.MeshType.FileMesh; mesh.MeshId = "rbxassetid://" .. id; mesh.Parent = part
-			placed = place(part)
-		elseif typeId == 24 then
-			local anim = Instance.new("Animation")
-			anim.Name = item.name or "ImportedAnimation"; anim.AnimationId = "rbxassetid://" .. id
-			placed = place(anim)
-		elseif typeId == 62 then
-			local part = makePart()
-			local surface = Instance.new("SurfaceGui"); surface.Face = Enum.NormalId.Front; surface.Parent = part
-			local video = Instance.new("VideoFrame"); video.Size = UDim2.fromScale(1, 1); video.Video = "rbxassetid://" .. id; video.Parent = surface
-			placed = place(part)
-		elseif typeId == 38 then
-			error("Plugins cannot be installed from an in-game runtime. Copy the ID and install through Studio.")
-		else
-			-- models (and anything not recognised): load the real asset
-			local objects
-			local okGet, got = pcall(function() return game:GetObjects("rbxassetid://" .. id) end)
-			if okGet and type(got) == "table" and #got > 0 then objects = got end
-			if not objects then
-				local okLoad, loaded = pcall(function() return game:GetService("InsertService"):LoadAsset(id) end)
-				if okLoad and loaded then objects = loaded:GetChildren() end
-			end
-			if not objects or #objects == 0 then error("Roblox blocked loading this model in this game/runtime") end
-			for _, obj in ipairs(objects) do
-				disableImportedScripts(obj)
-				placed = place(obj)
-			end
-		end
-	end)
-	if ok then
-		detail.Visible = false
-		showToast("Inserted LOCALLY (only you can see it)" .. (placed and (": " .. tostring(placed.Name):sub(1, 24)) or "") .. (hrp and " (in front of you)" or ""))
-	else
-		showToast("Insert failed: " .. tostring(msg):sub(1, 90))
-	end
-end)
-
 bPlay.MouseButton1Click:Connect(function()
 	if not curItem then return end
 	if bPlay.Text ~= "Play audio" then
@@ -1269,7 +1031,7 @@ end
 for i, c in ipairs(CATS) do
 	local b = round(new("TextButton", {
 		Size = UDim2.fromOffset(98, 28), BackgroundColor3 = C.card,
-		Text = c.icon .. " " .. c.name, TextColor3 = C.text,
+		Text = c.name, TextColor3 = C.text,
 		Font = Enum.Font.GothamBold, TextSize = 12, LayoutOrder = i,
 	}, catBar), 14)
 	catButtons[i] = b
@@ -1375,158 +1137,29 @@ copyTblBtn.MouseButton1Click:Connect(function()
 	copyOut(table.concat(lines, "\n"), "Lua table")
 end)
 
-local function buildSnippetsPage()
--- ===== SNIPPETS PAGE =====
-local pSnip = newPage("Snippets")
-local SNIPPETS = {
-	{"Touch door (open/close)", [==[-- Script inside the door Part (Anchored = true)
-local door = script.Parent
-local TweenService = game:GetService("TweenService")
-local closedCF = door.CFrame
-local openCF = closedCF * CFrame.new(0, door.Size.Y, 0)
-local open = false
-
-door.Touched:Connect(function(hit)
-	if open or not hit.Parent:FindFirstChildOfClass("Humanoid") then return end
-	open = true
-	TweenService:Create(door, TweenInfo.new(0.5), {CFrame = openCF}):Play()
-	task.wait(3)
-	TweenService:Create(door, TweenInfo.new(0.5), {CFrame = closedCF}):Play()
-	open = false
-end)]==]},
-	{"Kill brick", [==[-- Script inside a Part
-script.Parent.Touched:Connect(function(hit)
-	local hum = hit.Parent:FindFirstChildOfClass("Humanoid")
-	if hum then hum.Health = 0 end
-end)]==]},
-	{"Leaderstats (Coins)", [==[-- Script in ServerScriptService
-game.Players.PlayerAdded:Connect(function(player)
-	local ls = Instance.new("Folder")
-	ls.Name = "leaderstats"
-	ls.Parent = player
-
-	local coins = Instance.new("IntValue")
-	coins.Name = "Coins"
-	coins.Value = 0
-	coins.Parent = ls
-end)]==]},
-	{"Coin pickup", [==[-- Script inside a Part (needs the Leaderstats script)
-local part = script.Parent
-local used = false
-
-part.Touched:Connect(function(hit)
-	if used then return end
-	local player = game.Players:GetPlayerFromCharacter(hit.Parent)
-	if not player then return end
-	used = true
-	player.leaderstats.Coins.Value += 1
-	part:Destroy()
-end)]==]},
-	{"Teleporter pad", [==[-- Script inside the pad Part
-local pad = script.Parent
-local target = workspace:WaitForChild("TeleportTarget") -- Part to teleport to
-
-pad.Touched:Connect(function(hit)
-	local root = hit.Parent:FindFirstChild("HumanoidRootPart")
-	if root then
-		root.CFrame = target.CFrame + Vector3.new(0, 4, 0)
-	end
-end)]==]},
-	{"Spinning part", [==[-- Script inside a Part
-local part = script.Parent
-game:GetService("RunService").Heartbeat:Connect(function(dt)
-	part.CFrame *= CFrame.Angles(0, math.rad(90) * dt, 0)
-end)]==]},
-	{"Shop (ProximityPrompt)", [==[-- Script inside a Part that has a ProximityPrompt
-local prompt = script.Parent:FindFirstChildOfClass("ProximityPrompt")
-local PRICE = 50
-
-prompt.Triggered:Connect(function(player)
-	local coins = player.leaderstats.Coins
-	if coins.Value >= PRICE then
-		coins.Value -= PRICE
-		-- give the item here
-	end
-end)]==]},
-	{"Day / night cycle", [==[-- Script in ServerScriptService
-local Lighting = game:GetService("Lighting")
-while true do
-	Lighting.ClockTime = (Lighting.ClockTime + 0.05) % 24
-	task.wait(0.1)
-end]==]},
-	{"Checkpoint", [==[-- Script inside a SpawnLocation (set Neutral = false)
-local spawn = script.Parent
-spawn.Touched:Connect(function(hit)
-	local player = game.Players:GetPlayerFromCharacter(hit.Parent)
-	if player then player.RespawnLocation = spawn end
-end)]==]},
-	{"GUI button pop (LocalScript)", [==[-- LocalScript inside a TextButton
-local button = script.Parent
-local TweenService = game:GetService("TweenService")
-
-button.MouseButton1Click:Connect(function()
-	local info = TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, true)
-	TweenService:Create(button, info, {Size = button.Size + UDim2.fromOffset(10, 10)}):Play()
-end)]==]},
-	{"Tool activated", [==[-- Script inside a Tool
-local tool = script.Parent
-tool.Activated:Connect(function()
-	print(tool.Parent.Name .. " used " .. tool.Name)
-end)]==]},
-	{"Play sound on touch", [==[-- Script inside a Part that has a Sound child
-local part = script.Parent
-local sound = part:FindFirstChildOfClass("Sound")
-local cooldown = false
-
-part.Touched:Connect(function(hit)
-	if cooldown or not hit.Parent:FindFirstChildOfClass("Humanoid") then return end
-	cooldown = true
-	sound:Play()
-	task.wait(1)
-	cooldown = false
-end)]==]},
-}
-local snipScroll = vscroll(pSnip, UDim2.new(1, -16, 1, -4), UDim2.fromOffset(8, 0))
-new("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, snipScroll)
-for i, s in ipairs(SNIPPETS) do
-	local row = round(new("Frame", {
-		Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundColor3 = C.bar, LayoutOrder = i,
-	}, snipScroll), 8)
-	new("UIPadding", {PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4), PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)}, row)
-	new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, row)
-	local head = new("Frame", {Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, LayoutOrder = 1}, row)
-	local title = btn(head, s[1], UDim2.new(1, -70, 1, 0), nil, C.card, 12)
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	local cp = btn(head, "Copy", UDim2.fromOffset(62, 28), UDim2.new(1, -62, 0, 0), C.accent, 12)
-	local code = label(row, s[2], UDim2.new(1, 0, 0, 0), nil, C.sub, 11, Enum.Font.Code)
-	code.AutomaticSize = Enum.AutomaticSize.Y
-	code.TextYAlignment = Enum.TextYAlignment.Top
-	code.Visible = false
-	code.LayoutOrder = 2
-	title.MouseButton1Click:Connect(function() code.Visible = not code.Visible end)
-	cp.MouseButton1Click:Connect(function() copyOut(s[2], s[1]) end)
-end
-
-end -- buildSnippetsPage
-buildSnippetsPage()
-
 local function buildAIPage()
--- ===== AI AGENT (OpenRouter tool calling) =====
+-- ===== AI ASSISTANT (chat + coding, read-only tools, NVIDIA API) =====
 local pAI = newPage("AI")
 local LogService = game:GetService("LogService")
-local InsertService = game:GetService("InsertService")
 local lp = Players.LocalPlayer
 
 -- ---------- state ----------
 local history = {}          -- OpenAI-style chat messages
 local busy, stopFlag = false, false
-local notes = ""
-local undoGroups, currentGroup = {}, nil
 local pendingUser = {}
 local spawned = {}          -- threads started by run_script
-local scriptOut = {}        -- output captured from run_script
-local changeCount = 0
+local codeStore, codeCount = {}, {user = 0, ai = 0}
+local logSeq, logBuf = 0, {}
+
+pcall(function()
+	LogService.MessageOut:Connect(function(msg, typ)
+		logSeq += 1
+		local kind = "out"
+		if typ == Enum.MessageType.MessageError then kind = "error" elseif typ == Enum.MessageType.MessageWarning then kind = "warn" end
+		table.insert(logBuf, {seq = logSeq, kind = kind, text = tostring(msg)})
+		if #logBuf > 400 then table.remove(logBuf, 1) end
+	end)
+end)
 
 local function setting(name, default)
 	local v = db.set[name]
@@ -1534,21 +1167,11 @@ local function setting(name, default)
 	return v
 end
 local function getKey()
-	local k = db.set.orKey
+	local k = db.set.nvKey
 	if type(k) ~= "string" then return "" end
-	return (k:gsub("%s+", ""))
+	k = k:gsub("^%s*[Bb]earer%s+", ""):gsub("[%s\"']", "")
+	return k
 end
-
-local logBuf = {}
-pcall(function()
-	LogService.MessageOut:Connect(function(msg, typ)
-		local kind = "out"
-		if typ == Enum.MessageType.MessageError then kind = "error" elseif typ == Enum.MessageType.MessageWarning then kind = "warn" end
-		table.insert(logBuf, kind .. ": " .. tostring(msg))
-		if #logBuf > 300 then table.remove(logBuf, 1) end
-	end)
-end)
-
 local function clamp(n, a, b) return math.max(a, math.min(b, n)) end
 local function fail(msg, extra)
 	local t = extra or {}
@@ -1561,20 +1184,14 @@ local function okr(t)
 	t.ok = true
 	return t
 end
-local function logUndo(e)
-	changeCount += 1
-	if currentGroup then table.insert(currentGroup, e) end
-end
 
 -- ---------- paths ----------
 local SERVICES = {}
-for _, n in ipairs({"Workspace", "ReplicatedStorage", "ReplicatedFirst", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPack", "StarterPlayer", "Lighting", "Players", "SoundService", "Teams", "TextChatService", "Chat", "MaterialService", "Debris", "RunService", "TweenService", "CollectionService", "UserInputService", "HttpService", "MarketplaceService", "InsertService", "PhysicsService", "ContextActionService"}) do
+for _, n in ipairs({"Workspace", "ReplicatedStorage", "ReplicatedFirst", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPack", "StarterPlayer", "Lighting", "Players", "SoundService", "Teams", "TextChatService", "Chat", "MaterialService", "Debris", "RunService", "TweenService", "CollectionService", "UserInputService", "HttpService", "MarketplaceService", "InsertService", "PhysicsService", "ContextActionService", "CoreGui"}) do
 	SERVICES[n:lower()] = n
 end
-
 local function isHidden(inst)
-	if inst == gui then return true end
-	return inst:IsA("StringValue") and inst.Name:sub(1, 10) == "RGC_Source"
+	return inst == gui or inst:IsDescendantOf(gui)
 end
 local function pathOf(inst)
 	if inst == game then return "game" end
@@ -1597,7 +1214,6 @@ local function listNames(inst, n)
 	end
 	return table.concat(names, ", ")
 end
-
 local function resolve(path)
 	if type(path) ~= "string" then return nil, "path must be a string" end
 	local p = trim(path)
@@ -1612,8 +1228,7 @@ local function resolve(path)
 	local first = segs[1]
 	local low = first:lower()
 	local cur
-	if low == "project" or low == "rgc_project" then cur = projectRoot
-	elseif low == "localplayer" then cur = lp
+	if low == "localplayer" then cur = lp
 	elseif low == "playergui" then cur = lp and lp:FindFirstChildOfClass("PlayerGui")
 	elseif low == "character" then cur = lp and lp.Character
 	elseif low == "camera" or low == "currentcamera" then cur = Workspace.CurrentCamera
@@ -1622,11 +1237,11 @@ local function resolve(path)
 		local s, svc = pcall(game.GetService, game, SERVICES[low])
 		cur = s and svc or nil
 	else
-		cur = game:FindFirstChild(first) or projectRoot:FindFirstChild(first)
+		cur = game:FindFirstChild(first)
 	end
 	if not cur then
 		if not slash then
-			local deep = projectRoot:FindFirstChild(p, true)
+			local deep = Workspace:FindFirstChild(p, true)
 			if deep then return deep end
 		end
 		return nil, "Not found: '" .. first .. "'. Top-level: " .. listNames(game, 40)
@@ -1635,10 +1250,6 @@ local function resolve(path)
 		local nxt
 		if segs[i] == "LocalPlayer" and cur == Players then nxt = lp else nxt = cur:FindFirstChild(segs[i]) end
 		if not nxt then
-			if not slash then
-				local deep = projectRoot:FindFirstChild(p, true)
-				if deep then return deep end
-			end
 			return nil, ("Not found: '%s' under %s. Children there: %s"):format(segs[i], pathOf(cur), listNames(cur, 25))
 		end
 		cur = nxt
@@ -1646,20 +1257,7 @@ local function resolve(path)
 	return cur
 end
 
-local function destroyBlocked(inst)
-	if inst == game or inst.Parent == game then return "Services cannot be deleted/moved" end
-	if inst == gui or inst:IsDescendantOf(gui) then return "That is the RGC UI itself" end
-	if inst == lp or inst == Workspace.CurrentCamera or inst == Workspace.Terrain or inst == projectRoot then return "Protected object" end
-	return nil
-end
-local function canEdit(inst)
-	if inst == gui or inst:IsDescendantOf(gui) then return false, "That is the RGC UI itself" end
-	if setting("fullAccess", true) then return true end
-	if inst == projectRoot or inst:IsDescendantOf(projectRoot) then return true end
-	return false, "Outside RGC_Project. Turn on 'Allow all access' in AI settings to edit other places."
-end
-
--- ---------- value helpers ----------
+-- ---------- value / source helpers ----------
 local function ser(v)
 	local t = typeof(v)
 	if t == "Vector3" then return ("%g, %g, %g"):format(v.X, v.Y, v.Z)
@@ -1678,115 +1276,21 @@ local function ser(v)
 	end
 	return tostring(v)
 end
-local function nums(s)
-	local t = {}
-	for n in tostring(s):gmatch("[-+]?%d*%.?%d+") do table.insert(t, tonumber(n)) end
-	return t
-end
-local function parseValue(cur, text, name)
-	local s = trim(text)
-	local t = typeof(cur)
-	if t == "boolean" then
-		local l = s:lower()
-		if l == "true" or l == "1" or l == "yes" or l == "on" then return true end
-		if l == "false" or l == "0" or l == "no" or l == "off" then return false end
-		error("expected true/false")
-	elseif t == "number" then
-		local n = tonumber(s)
-		if not n then error("expected a number") end
-		return n
-	elseif t == "string" then
-		return text
-	elseif t == "Vector3" then
-		local n = nums(s); if #n < 3 then error("expected 'x, y, z'") end
-		return Vector3.new(n[1], n[2], n[3])
-	elseif t == "Vector2" then
-		local n = nums(s); if #n < 2 then error("expected 'x, y'") end
-		return Vector2.new(n[1], n[2])
-	elseif t == "Color3" then
-		if s:sub(1, 1) == "#" then return Color3.fromHex(s) end
-		local n = nums(s); if #n < 3 then error("expected 'r, g, b' or '#RRGGBB'") end
-		if n[1] > 1 or n[2] > 1 or n[3] > 1 then return Color3.fromRGB(clamp(n[1], 0, 255), clamp(n[2], 0, 255), clamp(n[3], 0, 255)) end
-		return Color3.new(n[1], n[2], n[3])
-	elseif t == "UDim2" then
-		local n = nums(s); if #n < 4 then error("expected 'xScale, xOffset, yScale, yOffset'") end
-		return UDim2.new(n[1], n[2], n[3], n[4])
-	elseif t == "UDim" then
-		local n = nums(s); if #n < 2 then error("expected 'scale, offset'") end
-		return UDim.new(n[1], n[2])
-	elseif t == "CFrame" then
-		local n = nums(s)
-		if #n == 3 then return CFrame.new(n[1], n[2], n[3]) end
-		if #n == 6 then return CFrame.new(n[1], n[2], n[3]) * CFrame.Angles(math.rad(n[4]), math.rad(n[5]), math.rad(n[6])) end
-		if #n == 12 then return CFrame.new(unpack(n)) end
-		error("expected 3 (position), 6 (position + rotation degrees) or 12 numbers")
-	elseif t == "EnumItem" then
-		local et = cur.EnumType
-		local item = et[s] or (s:find("%.") and et[s:match("[^%.]+$")])
-		if not item then
-			local n = tonumber(s)
-			if n then for _, it in ipairs(et:GetEnumItems()) do if it.Value == n then item = it end end end
-		end
-		if not item then error("unknown enum value '" .. s .. "'") end
-		return item
-	elseif t == "BrickColor" then
-		return BrickColor.new(s)
-	elseif t == "NumberRange" then
-		local n = nums(s); if #n < 1 then error("expected 'min, max'") end
-		return NumberRange.new(n[1], n[2] or n[1])
-	elseif t == "ColorSequence" then
-		local c = parseValue(Color3.new(), s)
-		return ColorSequence.new(c)
-	elseif t == "NumberSequence" then
-		local n = nums(s); if #n < 1 then error("expected a number") end
-		return NumberSequence.new(n[1])
-	elseif t == "Instance" or t == "nil" then
-		if s:lower() == "nil" or s == "" then return nil end
-		local inst, err = resolve(s)
-		if not inst then error(err) end
-		return inst
-	end
-	error("unsupported property type " .. t)
-end
-
--- ---------- script source (native or stored in StringValue chunks) ----------
-local CHUNK = 50000
-local nativeState = nil
-local function nativeSourceWorks()
-	if nativeState ~= nil then return nativeState end
-	nativeState = false
-	pcall(function()
-		local t = Instance.new("ModuleScript")
-		t.Source = "return 1"
-		local back = t.Source
-		t:Destroy()
-		if back == "return 1" then nativeState = true end
-	end)
-	return nativeState
-end
-local function shadowChunks(inst)
-	local list = {}
-	for _, c in ipairs(inst:GetChildren()) do
-		if c:IsA("StringValue") and c.Name:sub(1, 11) == "RGC_Source_" then table.insert(list, c) end
-	end
-	table.sort(list, function(a, b) return a.Name < b.Name end)
-	return list
-end
 local function readSource(inst)
 	if not inst:IsA("LuaSourceContainer") then return nil, "Not a script" end
-	local chunks = shadowChunks(inst)
-	if #chunks > 0 then
-		local t = {}
-		for _, c in ipairs(chunks) do t[#t + 1] = c.Value end
-		return table.concat(t)
-	end
 	local okk, src = pcall(function() return inst.Source end)
-	if okk and type(src) == "string" then return src end
+	if okk and type(src) == "string" and src ~= "" then return src end
 	if decompile then
 		local o2, d = pcall(decompile, inst)
-		if o2 and type(d) == "string" then return d end
+		if o2 and type(d) == "string" and d ~= "" then return d end
+		if not o2 then return nil, "decompile failed: " .. tostring(d) end
 	end
-	return nil, "Source of this script is protected in this runtime (only scripts created by the agent are readable)"
+	return nil, "Cannot read this script's source (no decompile in this executor, or it is a server-only script)"
+end
+local function lineCount(s)
+	if s == "" then return 0 end
+	local _, n = s:gsub("\n", "")
+	return n + 1
 end
 local function utf8Cut(s, stop)
 	while stop < #s do
@@ -1795,44 +1299,14 @@ local function utf8Cut(s, stop)
 	end
 	return stop
 end
-local function writeSource(inst, code)
-	if #code > 0 and nativeSourceWorks() then
-		local okk = pcall(function() inst.Source = code end)
-		if okk then
-			for _, c in ipairs(shadowChunks(inst)) do c:Destroy() end
-			return "native"
-		end
-	end
-	local chunks = shadowChunks(inst)
-	local pos, i = 1, 0
-	repeat
-		i += 1
-		local stop = utf8Cut(code, math.min(#code, pos + CHUNK - 1))
-		local piece = code:sub(pos, stop)
-		pos = stop + 1
-		local c = chunks[i]
-		if not c then
-			c = Instance.new("StringValue")
-			c.Name = ("RGC_Source_%03d"):format(i)
-			c.Parent = inst
-		end
-		c.Value = piece
-	until pos > #code
-	for k = i + 1, #chunks do chunks[k]:Destroy() end
-	return "shadow"
-end
-local function newScriptInstance(className)
-	local obj = Instance.new(className)
-	pcall(function() obj.Disabled = true end)
-	return obj
-end
-local function lineCount(s)
-	if s == "" then return 0 end
-	local _, n = s:gsub("\n", "")
-	return n + 1
+local function splitLines(src)
+	local lines = {}
+	for l in (src .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = l end
+	if src:sub(-1) == "\n" then lines[#lines] = nil end
+	return lines
 end
 
--- ---------- tools ----------
+-- ---------- tool registry ----------
 local TOOLS, ORDER = {}, {}
 local function P(t, d, extra)
 	local p = {type = t, description = d}
@@ -1846,41 +1320,8 @@ local function def(name, desc, props, required, fn)
 	table.insert(ORDER, name)
 end
 
-local function setProp(inst, name, text)
-	if name == "Source" then
-		if not inst:IsA("LuaSourceContainer") then error("Source only exists on scripts") end
-		local old = readSource(inst)
-		writeSource(inst, text)
-		logUndo({kind = "source", inst = inst, old = old})
-		return
-	end
-	if name == "Parent" then
-		local par, err = resolve(text)
-		if not par then error(err) end
-		local oldP = inst.Parent
-		inst.Parent = par
-		logUndo({kind = "moved", inst = inst, parent = oldP})
-		return
-	end
-	if name:sub(1, 1) == "@" then
-		local an = name:sub(2)
-		local old = inst:GetAttribute(an)
-		local v
-		local l = trim(text):lower()
-		if l == "true" then v = true elseif l == "false" then v = false elseif tonumber(text) then v = tonumber(text) else v = text end
-		inst:SetAttribute(an, v)
-		logUndo({kind = "attr", inst = inst, key = an, old = old})
-		return
-	end
-	local okRead, cur = pcall(function() return inst[name] end)
-	if not okRead then error("'" .. name .. "' is not a property of " .. inst.ClassName) end
-	local v = parseValue(cur, text, name)
-	inst[name] = v
-	logUndo({kind = "props", inst = inst, key = name, old = cur})
-end
-
-def("list_children", "List the direct children of an instance (name [Class] (child count)). Use to explore Workspace, ReplicatedStorage, ServerScriptService, StarterGui etc. Path examples: 'Workspace', 'ServerScriptService', 'Workspace/RGC_Project', 'game'.", {
-	path = P("STRING", "Instance path, e.g. 'Workspace/RGC_Project'. 'game' lists services."),
+def("list_children", "List the direct children of an instance (like the Dex/Explorer): name [Class] (child count). Paths: 'Workspace', 'ServerScriptService', 'ReplicatedStorage/StudioLiteFolder', 'StarterGui', 'game' (all services).", {
+	path = P("STRING", "Instance path"),
 	limit = P("INTEGER", "Max items (default 150)"),
 }, {"path"}, function(a)
 	local inst, err = resolve(a.path)
@@ -1903,7 +1344,7 @@ def("list_children", "List the direct children of an instance (name [Class] (chi
 	return okr({path = pathOf(inst), class = inst.ClassName, total = total, items = out, truncated = total > limit})
 end)
 
-def("get_tree", "Print an indented tree of an instance and its descendants (names + classes, ValueBase values). Good for a quick overview of a service or model.", {
+def("get_tree", "Indented tree of an instance and its descendants (names + classes, ValueBase values). Good overview of a service, model or GUI.", {
 	path = P("STRING", "Root of the tree"),
 	depth = P("INTEGER", "Max depth (default 3, max 8)"),
 	max_nodes = P("INTEGER", "Max nodes (default 300, max 800)"),
@@ -1932,22 +1373,21 @@ def("get_tree", "Print an indented tree of an instance and its descendants (name
 	return okr({root = pathOf(root), nodes = count, truncated = count >= maxNodes, tree = table.concat(lines, "\n")})
 end)
 
-def("find_instances", "Search descendants of an instance by name substring and/or class (IsA). Returns paths.", {
+def("find_instances", "Search descendants by name substring and/or class (IsA). Returns paths.", {
 	root = P("STRING", "Where to search (default Workspace)"),
 	name_contains = P("STRING", "Case-insensitive name substring"),
-	class_name = P("STRING", "Class or base class, e.g. 'BasePart', 'Script', 'RemoteEvent'"),
+	class_name = P("STRING", "Class or base class, e.g. 'BasePart', 'Script', 'RemoteEvent', 'ScreenGui'"),
 	limit = P("INTEGER", "Max results (default 80)"),
 }, nil, function(a)
 	local root, err = resolve(a.root or "Workspace")
 	if not root then return fail(err) end
 	local nm = a.name_contains and tostring(a.name_contains):lower() or nil
 	local limit = clamp(tonumber(a.limit) or 80, 1, 300)
-	local out, scanned = {}, 0
+	local out = {}
 	local okk, desc = pcall(root.GetDescendants, root)
 	if not okk then return fail("Cannot scan") end
 	for _, d in ipairs(desc) do
-		scanned += 1
-		if not isHidden(d) and not d:IsDescendantOf(gui) then
+		if not isHidden(d) then
 			local match = true
 			if nm and not d.Name:lower():find(nm, 1, true) then match = false end
 			if match and a.class_name and a.class_name ~= "" then
@@ -2004,115 +1444,10 @@ def("get_properties", "Read properties of an instance. Without 'names' returns t
 	local attrs = {}
 	pcall(function() for k, v in pairs(inst:GetAttributes()) do attrs[k] = ser(v) end end)
 	if next(attrs) then res.attributes = attrs end
-	if inst:IsA("LuaSourceContainer") then
-		local src = readSource(inst)
-		if src then res.source_lines = lineCount(src); res.source_chars = #src end
-	end
 	return res
 end)
 
-def("set_property", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Set one property. Value is always a string: numbers '5', booleans 'true', Vector3 '1, 2, 3', Color3 '255, 0, 0' or '#FF0000', UDim2 'xScale, xOffset, yScale, yOffset', CFrame '3 or 6 or 12 numbers', enums by name ('Neon'), instances by path. Use property 'Parent' (value = new parent path) to move, '@AttrName' for attributes, 'Source' for script code (prefer create_script/edit_script).", {
-	path = P("STRING", "Instance path"),
-	property = P("STRING", "Property name"),
-	value = P("STRING", "New value as string"),
-}, {"path", "property", "value"}, function(a)
-	local inst, err = resolve(a.path)
-	if not inst then return fail(err) end
-	local allowed, why = canEdit(inst)
-	if not allowed then return fail(why) end
-	if a.property == "Parent" then
-		local blocked = destroyBlocked(inst)
-		if blocked then return fail(blocked) end
-	end
-	local okk, e = pcall(setProp, inst, tostring(a.property), tostring(a.value))
-	if not okk then return fail(tostring(e)) end
-	local nowv = "?"
-	pcall(function() nowv = ser(inst[a.property]) end)
-	return okr({path = pathOf(inst), property = a.property, now = nowv})
-end)
-
-def("create_instance", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Create ANY instance (Part, Model, Folder, Sound, PointLight, ScreenGui, TextLabel, RemoteEvent, Humanoid, ...). For scripts prefer create_script. BaseParts default to Anchored and are placed in front of the player unless Position is given.", {
-	class_name = P("STRING", "ClassName, e.g. 'Part'"),
-	parent = P("STRING", "Parent path (default 'project' = Workspace/RGC_Project)"),
-	name = P("STRING", "Instance name"),
-	properties = P("ARRAY", "Properties to set", {items = {type = "OBJECT", properties = {name = P("STRING", "Property"), value = P("STRING", "Value as string")}, required = {"name", "value"}}}),
-}, {"class_name"}, function(a)
-	local parent, err = resolve(a.parent or "project")
-	if not parent then return fail(err) end
-	if parent == gui or parent:IsDescendantOf(gui) then return fail("Cannot create inside the RGC UI") end
-	if not setting("fullAccess", true) and not (parent == projectRoot or parent:IsDescendantOf(projectRoot)) then
-		return fail("Outside RGC_Project. Turn on 'Allow all access' in AI settings.")
-	end
-	local className = tostring(a.class_name)
-	local okNew, obj = pcall(Instance.new, className)
-	if not okNew or not obj then return fail("Cannot create class '" .. className .. "'") end
-	obj.Name = (a.name and tostring(a.name) ~= "") and tostring(a.name) or className
-	local givenPos, errs = false, {}
-	if obj:IsA("LuaSourceContainer") then pcall(function() obj.Disabled = true end) end
-	if obj:IsA("BasePart") then obj.Anchored = true end
-	if type(a.properties) == "table" then
-		for _, p in ipairs(a.properties) do
-			if type(p) == "table" and p.name then
-				if p.name == "Position" or p.name == "CFrame" then givenPos = true end
-				local saved = currentGroup
-				currentGroup = nil
-				local okP, e = pcall(setProp, obj, tostring(p.name), tostring(p.value))
-				currentGroup = saved
-				if not okP then table.insert(errs, tostring(p.name) .. ": " .. tostring(e)) end
-			end
-		end
-	end
-	if obj:IsA("BasePart") and not givenPos then
-		local hrp = lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
-		obj.Position = hrp and (hrp.Position + hrp.CFrame.LookVector * 10 + Vector3.new(0, 2, 0)) or Vector3.new(0, 5, 0)
-	end
-	obj.Parent = parent
-	logUndo({kind = "created", inst = obj})
-	local res = okr({path = pathOf(obj), class = obj.ClassName, scope = "CLIENT-ONLY (server and other players cannot see it)"})
-	if #errs > 0 then res.property_errors = errs end
-	return res
-end)
-
-def("create_script", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Create (or overwrite/append to) a Script, LocalScript or ModuleScript with source code. Keep each call under ~200 lines: for bigger scripts call once with mode='replace' and then again with mode='append' for each next part. Always verify with read_script for big scripts.", {
-	parent = P("STRING", "Parent path, e.g. 'ServerScriptService', 'StarterGui', 'StarterPlayer/StarterPlayerScripts', 'Workspace/RGC_Project'"),
-	name = P("STRING", "Script name"),
-	script_type = P("STRING", "Script, LocalScript or ModuleScript", {enum = {"Script", "LocalScript", "ModuleScript"}}),
-	source = P("STRING", "Luau source (this chunk)"),
-	mode = P("STRING", "replace (default) or append", {enum = {"replace", "append"}}),
-}, {"parent", "name", "source"}, function(a)
-	local parent, err = resolve(a.parent or "project")
-	if not parent then return fail(err) end
-	if parent == gui or parent:IsDescendantOf(gui) then return fail("Cannot create inside the RGC UI") end
-	if not setting("fullAccess", true) and not (parent == projectRoot or parent:IsDescendantOf(projectRoot)) then
-		return fail("Outside RGC_Project. Turn on 'Allow all access' in AI settings.")
-	end
-	local name = tostring(a.name)
-	local code = tostring(a.source or "")
-	local inst = parent:FindFirstChild(name)
-	local created = false
-	if inst and not inst:IsA("LuaSourceContainer") then return fail("'" .. name .. "' already exists and is not a script (" .. inst.ClassName .. ")") end
-	if not inst then
-		local stype = tostring(a.script_type or "Script")
-		if stype ~= "Script" and stype ~= "LocalScript" and stype ~= "ModuleScript" then return fail("script_type must be Script, LocalScript or ModuleScript") end
-		inst = newScriptInstance(stype)
-		inst.Name = name
-		inst.Parent = parent
-		created = true
-		logUndo({kind = "created", inst = inst})
-	end
-	local old = readSource(inst)
-	local final = code
-	if a.mode == "append" and old and old ~= "" then
-		final = old .. (old:sub(-1) == "\n" and "" or "\n") .. code
-	end
-	if not created then logUndo({kind = "source", inst = inst, old = old}) end
-	local okW, how = pcall(writeSource, inst, final)
-	if not okW then return fail("Write failed: " .. tostring(how)) end
-	local back = readSource(inst)
-	return okr({path = pathOf(inst), class = inst.ClassName, scope = "CLIENT-ONLY (not a real server script)", created = created, storage = how, lines = lineCount(final), chars = #final, verified = (back == final)})
-end)
-
-def("read_script", "Read a script's source with line numbers. Returns up to ~12000 chars per call; use start_line/end_line to page (next_start_line is given when truncated). Only scripts created by the agent (or readable in this runtime) can be read.", {
+def("read_script", "Read the source of a script in the game with line numbers (needs decompile support; server-only scripts cannot be read). Returns up to ~12000 chars per call; page with start_line/end_line (next_start_line is returned when truncated).", {
 	path = P("STRING", "Script path"),
 	start_line = P("INTEGER", "First line (default 1)"),
 	end_line = P("INTEGER", "Last line (default end)"),
@@ -2121,9 +1456,7 @@ def("read_script", "Read a script's source with line numbers. Returns up to ~120
 	if not inst then return fail(err) end
 	local src, why = readSource(inst)
 	if not src then return fail(why) end
-	local lines = {}
-	for l in (src .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = l end
-	if src:sub(-1) == "\n" then lines[#lines] = nil end
+	local lines = splitLines(src)
 	local total = #lines
 	local s = clamp(tonumber(a.start_line) or 1, 1, math.max(1, total))
 	local e = clamp(tonumber(a.end_line) or total, s, math.max(s, total))
@@ -2135,145 +1468,110 @@ def("read_script", "Read a script's source with line numbers. Returns up to ~120
 		out[#out + 1] = row
 		last = i
 	end
-	local res = okr({path = pathOf(inst), class = inst.ClassName, total_lines = total, total_chars = #src, from = s, to = last, code = table.concat(out, "\n")})
+	local res = okr({path = pathOf(inst), class = inst.ClassName, total_lines = total, from = s, to = last, code = table.concat(out, "\n")})
 	if last < e then res.next_start_line = last + 1 end
 	return res
 end)
 
-def("edit_script", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Replace an exact piece of text inside a script (find must match exactly, including whitespace). Fails if 'find' is missing or not unique unless replace_all=true. Preferred way to modify existing code.", {
-	path = P("STRING", "Script path"),
-	find = P("STRING", "Exact text to find"),
-	replace = P("STRING", "Replacement text"),
-	replace_all = P("BOOLEAN", "Replace every occurrence"),
-}, {"path", "find", "replace"}, function(a)
-	local inst, err = resolve(a.path)
-	if not inst then return fail(err) end
-	local src, why = readSource(inst)
-	if not src then return fail(why) end
-	local find, rep = tostring(a.find), tostring(a.replace)
-	if find == "" then return fail("'find' is empty") end
-	local count, pos = 0, 1
-	while true do
-		local s, e = src:find(find, pos, true)
-		if not s then break end
-		count += 1
-		pos = e + 1
+def("search_scripts", "Search the text of every readable script in the game (LocalScripts, ModuleScripts, loaded modules) for a word, e.g. a remote's name, a function or a GUI name. Use it to learn how the game's systems and remotes are used.", {
+	query = P("STRING", "Text to find (case-insensitive)"),
+	limit = P("INTEGER", "Max matching lines (default 25)"),
+}, {"query"}, function(a)
+	if not decompile then return fail("This executor has no decompile, so scripts cannot be searched.") end
+	local q = tostring(a.query or ""):lower()
+	if q == "" then return fail("query is empty") end
+	local limit = clamp(tonumber(a.limit) or 25, 1, 80)
+	local seen, list = {}, {}
+	local function add(s)
+		if typeof(s) == "Instance" and not seen[s] and s:IsA("LuaSourceContainer") and not isHidden(s) then
+			seen[s] = true
+			list[#list + 1] = s
+		end
 	end
-	if count == 0 then return fail("Text to find was not found. Use read_script to copy the exact text.") end
-	if count > 1 and not a.replace_all then return fail(count .. " matches; make 'find' longer/unique or set replace_all=true") end
-	local out, p2 = {}, 1
-	while true do
-		local s, e = src:find(find, p2, true)
-		if not s then break end
-		out[#out + 1] = src:sub(p2, s - 1)
-		out[#out + 1] = rep
-		p2 = e + 1
-		if not a.replace_all then break end
+	for _, d in ipairs(game:GetDescendants()) do add(d) end
+	if getscripts then pcall(function() for _, s in ipairs(getscripts()) do add(s) end end) end
+	if getloadedmodules then pcall(function() for _, s in ipairs(getloadedmodules()) do add(s) end end) end
+	local out, scanned = {}, 0
+	for i, s in ipairs(list) do
+		if i > 600 or #out >= limit then break end
+		if i % 6 == 0 then task.wait() end
+		local src = readSource(s)
+		if src then
+			scanned += 1
+			if src:lower():find(q, 1, true) then
+				local hits = 0
+				for n, l in ipairs(splitLines(src)) do
+					if l:lower():find(q, 1, true) then
+						out[#out + 1] = pathOf(s) .. ":" .. n .. ": " .. trim(l):sub(1, 160)
+						hits += 1
+						if hits >= 4 or #out >= limit then break end
+					end
+				end
+			end
+		end
 	end
-	out[#out + 1] = src:sub(p2)
-	local final = table.concat(out)
-	logUndo({kind = "source", inst = inst, old = src})
-	local how = writeSource(inst, final)
-	return okr({path = pathOf(inst), replaced = a.replace_all and count or 1, lines = lineCount(final), storage = how})
+	return okr({scripts_scanned = scanned, scripts_total = #list, matches = out})
 end)
 
-def("edit_script_lines", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Replace lines start_line..end_line (inclusive, 1-based) of a script with new_text. Use new_text='' to delete lines. To insert before line N use start_line=N, end_line=N-1.", {
-	path = P("STRING", "Script path"),
-	start_line = P("INTEGER", "First line to replace"),
-	end_line = P("INTEGER", "Last line to replace"),
-	new_text = P("STRING", "New text (may be multiple lines)"),
-}, {"path", "start_line", "end_line", "new_text"}, function(a)
-	local inst, err = resolve(a.path)
-	if not inst then return fail(err) end
-	local src, why = readSource(inst)
-	if not src then return fail(why) end
-	local lines = {}
-	for l in (src .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = l end
-	if src:sub(-1) == "\n" then lines[#lines] = nil end
-	local s, e = tonumber(a.start_line), tonumber(a.end_line)
-	if not s or not e or s < 1 or s > #lines + 1 or e < s - 1 or e > #lines then return fail("Invalid line range (script has " .. #lines .. " lines)") end
+def("list_remotes", "List RemoteEvents/RemoteFunctions (default: everywhere). The game's own remotes are already loaded when this runs, for example under ReplicatedStorage/StudioLiteFolder. Use search_scripts with a remote's name to see how it is called.", {
+	root = P("STRING", "Where to look (default game)"),
+	limit = P("INTEGER", "Max results (default 150)"),
+}, nil, function(a)
+	local root, err = resolve(a.root or "game")
+	if not root then return fail(err) end
+	local limit = clamp(tonumber(a.limit) or 150, 1, 400)
 	local out = {}
-	for i = 1, s - 1 do out[#out + 1] = lines[i] end
-	local nt = tostring(a.new_text or "")
-	if nt ~= "" then out[#out + 1] = nt end
-	for i = e + 1, #lines do out[#out + 1] = lines[i] end
-	local final = table.concat(out, "\n")
-	logUndo({kind = "source", inst = inst, old = src})
-	local how = writeSource(inst, final)
-	return okr({path = pathOf(inst), lines = lineCount(final), storage = how})
-end)
-
-def("delete_instance", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Destroy an instance (and its descendants). Services and the RGC UI are protected.", {
-	path = P("STRING", "Instance path"),
-}, {"path"}, function(a)
-	local inst, err = resolve(a.path)
-	if not inst then return fail(err) end
-	local blocked = destroyBlocked(inst)
-	if blocked then return fail(blocked) end
-	local allowed, why = canEdit(inst)
-	if not allowed then return fail(why) end
-	local parent, p = inst.Parent, pathOf(inst)
-	local n = 1
-	pcall(function() n += #inst:GetDescendants() end)
-	local okC, clone = pcall(function() return inst:Clone() end)
-	inst:Destroy()
-	logUndo({kind = "deleted", clone = okC and clone or nil, parent = parent})
-	return okr({deleted = p, instances_removed = n, undo_available = okC and clone ~= nil})
-end)
-
-def("move_instance", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Move an instance to a new parent (and optionally rename it).", {
-	path = P("STRING", "Instance path"),
-	new_parent = P("STRING", "New parent path"),
-	new_name = P("STRING", "Optional new name"),
-}, {"path", "new_parent"}, function(a)
-	local inst, err = resolve(a.path)
-	if not inst then return fail(err) end
-	local blocked = destroyBlocked(inst)
-	if blocked then return fail(blocked) end
-	local allowed, why = canEdit(inst)
-	if not allowed then return fail(why) end
-	local np, e2 = resolve(a.new_parent)
-	if not np then return fail(e2) end
-	if np == inst or np:IsDescendantOf(inst) then return fail("Cannot move an instance into itself") end
-	local oldP, oldN = inst.Parent, inst.Name
-	inst.Parent = np
-	logUndo({kind = "moved", inst = inst, parent = oldP})
-	if a.new_name and tostring(a.new_name) ~= "" then
-		inst.Name = tostring(a.new_name)
-		logUndo({kind = "props", inst = inst, key = "Name", old = oldN})
+	local okD, desc = pcall(root.GetDescendants, root)
+	if not okD then return fail("Cannot scan") end
+	for _, d in ipairs(desc) do
+		if d:IsA("RemoteEvent") or d:IsA("RemoteFunction") or d:IsA("UnreliableRemoteEvent") then
+			out[#out + 1] = pathOf(d) .. " [" .. d.ClassName .. "]"
+			if #out >= limit then break end
+		end
 	end
-	return okr({path = pathOf(inst)})
+	table.sort(out)
+	return okr({count = #out, truncated = #out >= limit, remotes = out})
 end)
 
-def("clone_instance", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Clone an instance (scripts keep their stored code).", {
-	path = P("STRING", "Instance path"),
-	new_parent = P("STRING", "Parent for the clone (default: same parent)"),
-	new_name = P("STRING", "Name for the clone"),
-}, {"path"}, function(a)
-	local inst, err = resolve(a.path)
-	if not inst then return fail(err) end
-	local par = inst.Parent
-	if a.new_parent then
-		local np, e2 = resolve(a.new_parent)
-		if not np then return fail(e2) end
-		par = np
+local function historyLines()
+	local lines = {}
+	local okH, hist = pcall(function() return LogService:GetLogHistory() end)
+	if okH and type(hist) == "table" then
+		for _, e in ipairs(hist) do
+			local kind = "out"
+			if e.messageType == Enum.MessageType.MessageError then kind = "error" elseif e.messageType == Enum.MessageType.MessageWarning then kind = "warn" end
+			lines[#lines + 1] = {kind = kind, text = tostring(e.message)}
+		end
 	end
-	local okC, c = pcall(function() return inst:Clone() end)
-	if not okC or not c then return fail("This instance cannot be cloned") end
-	if a.new_name and tostring(a.new_name) ~= "" then c.Name = tostring(a.new_name) end
-	c.Parent = par
-	logUndo({kind = "created", inst = c})
-	return okr({path = pathOf(c)})
+	if #lines == 0 then
+		for _, e in ipairs(logBuf) do lines[#lines + 1] = {kind = e.kind, text = e.text} end
+	end
+	return lines
+end
+def("get_output", "Read the latest game console output (prints, warnings, errors with script name and line number). Use this first when the user reports an error.", {
+	limit = P("INTEGER", "Number of recent lines (default 40, max 150)"),
+	only_errors = P("BOOLEAN", "Only warnings and errors"),
+	contains = P("STRING", "Only lines containing this text"),
+}, nil, function(a)
+	local limit = clamp(tonumber(a.limit) or 40, 1, 150)
+	local all = historyLines()
+	local lines = {}
+	local f = a.contains and tostring(a.contains):lower() or nil
+	for _, l in ipairs(all) do
+		if (not a.only_errors or l.kind ~= "out") and (not f or l.text:lower():find(f, 1, true)) then
+			lines[#lines + 1] = l.kind .. ": " .. l.text:sub(1, 400)
+		end
+	end
+	local out = {}
+	for i = math.max(1, #lines - limit + 1), #lines do out[#out + 1] = lines[i] end
+	return okr({count = #out, total_in_log = #all, lines = out})
 end)
 
-local function captureEnv(scriptInst, out)
+local function captureEnv(out)
 	local function cap(prefix, ...)
 		local parts = {}
 		for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
-		local line = prefix .. table.concat(parts, "\t")
-		table.insert(out, line)
-		table.insert(scriptOut, line)
-		if #scriptOut > 200 then table.remove(scriptOut, 1) end
+		table.insert(out, prefix .. table.concat(parts, "\t"))
 	end
 	local base
 	if getgenv then
@@ -2285,35 +1583,44 @@ local function captureEnv(scriptInst, out)
 		base = o and g or _G
 	end
 	return setmetatable({
-		script = scriptInst,
 		print = function(...) cap("", ...) end,
 		warn = function(...) cap("[warn] ", ...) end,
 	}, {__index = base})
 end
 
-def("run_script", "Execute Luau locally in this game session and capture print/warn output and errors. Give either 'path' of a script you created, or inline 'source' for a quick test/one-off action (e.g. quickly spawn things, query game state). Scripts that loop forever keep running; use stop_scripts to cancel.", {
-	path = P("STRING", "Path of a script to run"),
-	source = P("STRING", "Inline Luau to run"),
-	wait_seconds = P("NUMBER", "How long to wait for it to finish (default 3, max 20)"),
+def("run_script", "Run Luau locally to reproduce an error or test a fix; captures print/warn output, the error message and any new console errors. Give 'script_id' (a script the user pasted in chat, e.g. user_script_1, or one you wrote earlier, e.g. ai_script_1), or 'path' of a readable script, or short inline 'source'. Only use when the user asks to debug/test.", {
+	script_id = P("STRING", "Id of a script from the chat, e.g. user_script_1"),
+	path = P("STRING", "Path of a readable script in the game"),
+	source = P("STRING", "Short inline Luau"),
+	wait_seconds = P("NUMBER", "How long to wait for it to finish (default 4, max 20)"),
 }, nil, function(a)
-	if not setting("fullAccess", true) then return fail("Running code needs 'Allow all access' to be ON in AI settings") end
-	local src, inst, label_ = nil, nil, "inline"
-	if a.path and a.path ~= "" then
-		local i2, err = resolve(a.path)
-		if not i2 then return fail(err) end
-		local s, why = readSource(i2)
+	if not setting("allowRun", true) then return fail("Running scripts is turned off in the AI settings") end
+	local src, label_ = nil, "inline"
+	if a.script_id and a.script_id ~= "" then
+		local e = codeStore[tostring(a.script_id)]
+		if not e then
+			local ids = {}
+			for k in pairs(codeStore) do ids[#ids + 1] = k end
+			table.sort(ids)
+			return fail("Unknown script_id. Available: " .. (#ids > 0 and table.concat(ids, ", ") or "none"))
+		end
+		src, label_ = e.source, tostring(a.script_id)
+	elseif a.path and a.path ~= "" then
+		local inst, err = resolve(a.path)
+		if not inst then return fail(err) end
+		local s, why = readSource(inst)
 		if not s then return fail(why) end
-		src, inst, label_ = s, i2, i2.Name
+		src, label_ = s, inst.Name
 	else
 		src = tostring(a.source or "")
 	end
-	if src == "" then return fail("Nothing to run (give 'path' or 'source')") end
+	if src == "" then return fail("Nothing to run (give script_id, path or source)") end
 	if not loadstring then return fail("loadstring is not available in this executor") end
 	local fn, cerr = loadstring(src, "=" .. label_)
 	if not fn then return fail("Compile error: " .. tostring(cerr)) end
 	local out = {}
-	local env = captureEnv(inst, out)
-	pcall(setfenv, fn, env)
+	pcall(setfenv, fn, captureEnv(out))
+	local seq0 = logSeq
 	local done, result, errMsg = false, nil, nil
 	local th = task.spawn(function()
 		local okR, res = pcall(fn)
@@ -2321,18 +1628,25 @@ def("run_script", "Execute Luau locally in this game session and capture print/w
 		if okR then result = res else errMsg = tostring(res) end
 	end)
 	table.insert(spawned, th)
-	local t0, waitFor = os.clock(), clamp(tonumber(a.wait_seconds) or 3, 0, 20)
+	local t0, waitFor = os.clock(), clamp(tonumber(a.wait_seconds) or 4, 0, 20)
 	while not done and os.clock() - t0 < waitFor do task.wait(0.1) end
+	task.wait(0.3)
 	local text = table.concat(out, "\n")
 	if #text > 4000 then text = text:sub(1, 4000) .. "\n...(output cut)" end
-	local res = {ok = errMsg == nil, finished = done, output = text}
+	local newLogs = {}
+	for _, e in ipairs(logBuf) do
+		if e.seq > seq0 and e.kind ~= "out" then newLogs[#newLogs + 1] = e.kind .. ": " .. e.text:sub(1, 300) end
+		if #newLogs >= 25 then break end
+	end
+	local res = {ok = errMsg == nil and #newLogs == 0, finished = done, output = text}
 	if errMsg then res.error = errMsg end
+	if #newLogs > 0 then res.console_errors = newLogs end
 	if done and result ~= nil then res.returned = tostring(result):sub(1, 300) end
-	if not done then res.note = "Still running in the background (use stop_scripts to cancel)" end
+	if not done then res.note = "Still running in the background (stop_scripts cancels it)" end
 	return res
 end)
 
-def("stop_scripts", "Cancel all scripts started with run_script that are still running.", nil, nil, function()
+def("stop_scripts", "Cancel scripts started with run_script that are still running.", nil, nil, function()
 	local n = 0
 	for _, th in ipairs(spawned) do
 		if pcall(task.cancel, th) then n += 1 end
@@ -2341,145 +1655,25 @@ def("stop_scripts", "Cancel all scripts started with run_script that are still r
 	return okr({cancelled = n})
 end)
 
-def("get_output", "Read recent game console output (prints, warnings, errors) to debug. Includes output from run_script.", {
-	limit = P("INTEGER", "Number of recent lines (default 40, max 120)"),
-	only_errors = P("BOOLEAN", "Only warnings and errors"),
-}, nil, function(a)
-	local limit = clamp(tonumber(a.limit) or 40, 1, 120)
-	local lines = {}
-	for _, l in ipairs(logBuf) do
-		if not a.only_errors or l:sub(1, 5) == "error" or l:sub(1, 4) == "warn" then table.insert(lines, l) end
-	end
-	local out = {}
-	for i = math.max(1, #lines - limit + 1), #lines do out[#out + 1] = lines[i]:sub(1, 300) end
-	return okr({count = #out, lines = out})
-end)
-
-def("get_player", "Get the local player's position, facing direction and camera position (useful for placing things).", nil, nil, function()
+def("get_player", "Local player's position, facing direction, camera position and humanoid stats.", nil, nil, function()
 	local res = okr({})
-	local hrp = lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+	local char = lp and lp.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
 	if hrp then
 		res.position = ser(hrp.Position)
 		res.look_direction = ser(hrp.CFrame.LookVector)
 	else
 		res.note = "No character yet"
 	end
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum then res.humanoid = ("WalkSpeed %g, JumpPower %g, Health %g"):format(hum.WalkSpeed, hum.JumpPower, hum.Health) end
 	local cam = Workspace.CurrentCamera
 	if cam then res.camera_position = ser(cam.CFrame.Position) end
 	res.player = lp and lp.Name or "?"
 	return res
 end)
 
-local CAT = {Model = {10, "Model"}, Audio = {3, "Audio"}, Music = {300, "Audio"}, Image = {13, "Decal"}, Decal = {13, "Decal"}, Mesh = {40, "MeshPart"}, Animation = {24, nil}, Video = {62, "Video"}}
-def("search_assets", "Search the Roblox Creator Store for models, audio, images, meshes, animations. Returns asset ids you can pass to insert_asset (models) or use in properties (e.g. SoundId 'rbxassetid://ID').", {
-	query = P("STRING", "Search keywords"),
-	category = P("STRING", "Model (default), Audio, Image, Mesh, Animation, Video"),
-	limit = P("INTEGER", "Max results (default 10, max 30)"),
-}, {"query"}, function(a)
-	local cat = CAT[tostring(a.category or "Model")] or CAT.Model
-	local limit = clamp(tonumber(a.limit) or 10, 1, 30)
-	local kw = tostring(a.query)
-	local ids, info = {}, {}
-	if db.set.storeKey and db.set.storeKey ~= "" and cat[2] then
-		local res = postJSONWithHeaders("https://apis.roblox.com/toolbox-service/v2/assets:search", {["x-api-key"] = db.set.storeKey}, {searchCategoryType = cat[2], query = kw, maxPageSize = limit, searchView = "Full", sortCategory = "Relevance", pageNumber = 0})
-		local entries = res and (res.creatorStoreAssets or res.data or res.assets or res.items or res.results)
-		if type(entries) == "table" then
-			for _, entry in ipairs(entries) do
-				local x = type(entry) == "table" and (entry.asset or entry) or nil
-				local id = x and (x.id or x.assetId)
-				if id then
-					table.insert(ids, id)
-					info[id] = {name = x.name or x.title, creator = type(entry.creator) == "table" and entry.creator.name or nil}
-				end
-			end
-		end
-	end
-	if #ids == 0 then
-		local res = getJSON(("%s%d?limit=%d&pageNumber=0&keyword=%s"):format(MARKET, cat[1], limit, HttpService:UrlEncode(kw)))
-		if not res or type(res.data) ~= "table" then return fail("Search failed (HTTP blocked or the Creator Store API key lacks access)") end
-		for _, v in ipairs(res.data) do table.insert(ids, v.id) end
-		if #ids > 0 then
-			local det = getJSON(DETAILS .. table.concat(ids, ","))
-			if det and type(det.data) == "table" then
-				for _, d in ipairs(det.data) do
-					local x = d.asset or d
-					if x and x.id then info[x.id] = {name = x.name, creator = d.creator and d.creator.name} end
-				end
-			end
-		end
-	end
-	local out = {}
-	for i, id in ipairs(ids) do
-		if i > limit then break end
-		local it = info[id] or {}
-		out[#out + 1] = ("%s | %s%s"):format(tostring(id), tostring(it.name or "?"), it.creator and (" | by " .. it.creator) or "")
-	end
-	return okr({count = #out, results = out})
-end)
-
-def("insert_asset", "Insert a Creator Store asset by id on the SERVER using Studio Lite's own loader remotes (real, visible to everyone). Falls back to a client-only insert if the remotes fail. Use search_assets first to find ids.", {
-	asset_id = P("INTEGER", "Asset id"),
-}, {"asset_id"}, function(a)
-	local id = tonumber(a.asset_id)
-	if not id then return fail("asset_id must be a number") end
-	if not setting("fullAccess", true) then return fail("Needs 'Allow all access' ON") end
-	local okS, found, ret = serverInsertAsset(id)
-	if okS then
-		changeCount += 1
-		local items = {}
-		for _, f in ipairs(found) do items[#items + 1] = f.where .. "/" .. f.name end
-		return okr({server_side = true, inserted = items, note = #items == 0 and "Remote accepted the request but no new object was detected yet; check get_tree on Workspace in a moment." or "Inserted through Studio Lite's server remotes.", returned = ret ~= nil and tostring(ret):sub(1, 100) or nil})
-	end
-	return fail("Server insert failed: " .. tostring(found))
-end)
-
-def("list_remotes", "List RemoteEvents/RemoteFunctions under an instance (default ReplicatedStorage). Studio Lite's own remotes are under ReplicatedStorage/StudioLiteFolder.", {
-	root = P("STRING", "Where to look (default ReplicatedStorage)"),
-	limit = P("INTEGER", "Max results (default 120)"),
-}, nil, function(a)
-	local root, err = resolve(a.root or "ReplicatedStorage")
-	if not root then return fail(err) end
-	local list = scanRemotes(root, clamp(tonumber(a.limit) or 120, 1, 300))
-	local out = {}
-	for _, r in ipairs(list) do out[#out + 1] = r.path .. " [" .. r.class .. "]" end
-	return okr({count = #out, remotes = out})
-end)
-
-def("get_spy_log", "Read the remote calls the USER recorded with the Bridge tab 'Spy' while using Studio Lite's own buttons (create part, new script, set property...). This shows the exact remote names and argument formats, so you can replay/adapt them with call_remote. If empty, ask the user to turn Spy ON in the Bridge tab, do the action in Studio Lite, then tell you.", {
-	limit = P("INTEGER", "Number of recent calls (default 30)"),
-}, nil, function(a)
-	local n = clamp(tonumber(a.limit) or 30, 1, 100)
-	return okr({spy_installed = spy.hooked, spy_on = spy.on, total = #spy.log, calls = spy.text(n)})
-end)
-
-def("call_remote", "Call a RemoteEvent (fire) or RemoteFunction (invoke): the way to make REAL server-side changes. args_json is a JSON array of arguments. Special strings: 'inst:Workspace/Part' (instance), 'v3:1,2,3', 'v2:1,2', 'c3:255,0,0' (Color3), 'cf:x,y,z' or 12 numbers (CFrame), 'nil:' (nil). Learn the exact format from get_spy_log before guessing; never guess destructive calls.", {
-	path = P("STRING", "Remote path, e.g. ReplicatedStorage/StudioLiteFolder/SomeRemote"),
-	method = P("STRING", "fire or invoke (default: by remote class)", {enum = {"fire", "invoke"}}),
-	args_json = P("STRING", "JSON array of arguments, e.g. [\"abc\", 5, \"v3:0,5,0\"]"),
-}, {"path"}, function(a)
-	if not setting("fullAccess", true) then return fail("Needs 'Allow all access' ON") end
-	local r, err = resolve(a.path)
-	if not r then return fail(err) end
-	if not (r:IsA("RemoteEvent") or r:IsA("RemoteFunction") or r:IsA("UnreliableRemoteEvent")) then return fail(pathOf(r) .. " is not a remote (" .. r.ClassName .. ")") end
-	local args, n = {}, 0
-	if a.args_json and trim(a.args_json) ~= "" then
-		local okJ, decoded = pcall(HttpService.JSONDecode, HttpService, a.args_json)
-		if not okJ or type(decoded) ~= "table" or (decoded[1] == nil and next(decoded) ~= nil) then return fail("args_json must be a JSON array like [\"a\", 1]") end
-		n = #decoded
-		for i = 1, n do args[i] = fromTagged(decoded[i]) end
-	end
-	local method = a.method or (r:IsA("RemoteFunction") and "invoke" or "fire")
-	if method == "invoke" and not r:IsA("RemoteFunction") then return fail("This is a RemoteEvent: use method 'fire'") end
-	if method == "fire" and r:IsA("RemoteFunction") then return fail("This is a RemoteFunction: use method 'invoke'") end
-	local res = callRemote(r, method, args, n)
-	if not res[1] then return fail("Remote error: " .. tostring(res[2])) end
-	local out = {}
-	for i = 2, res.n do out[#out + 1] = toTagged(res[i], 0) end
-	changeCount += 1
-	return okr({called = pathOf(r), method = method, returned = out, note = "Server calls cannot be undone from the Undo button."})
-end)
-
-def("describe_map", "Summarize the map in Workspace (or a sub-tree): part counts, size/bounds, biggest models, lighting, spawns, sounds, lights, scripts, how dense it is. Use it before giving advice about what to add or improve.", {
+def("describe_map", "Summarize the map in Workspace (or a sub-tree): part counts, size/bounds, biggest models, lighting, spawns, sounds, lights, scripts, density. Use before giving advice about what to add or improve.", {
 	root = P("STRING", "Where (default Workspace)"),
 }, nil, function(a)
 	local root, err = resolve(a.root or "Workspace")
@@ -2493,7 +1687,7 @@ def("describe_map", "Summarize the map in Workspace (or a sub-tree): part counts
 		scanned += 1
 		if scanned > 60000 then trunc = true break end
 		if scanned % 4000 == 0 then task.wait() end
-		if not isHidden(d) and not d:IsDescendantOf(gui) then
+		if not isHidden(d) then
 			counts[d.ClassName] = (counts[d.ClassName] or 0) + 1
 			if d:IsA("BasePart") then
 				parts += 1
@@ -2552,96 +1746,50 @@ def("describe_map", "Summarize the map in Workspace (or a sub-tree): part counts
 	return res
 end)
 
-def("save_notes", "Save a short plan / progress note (max ~3000 chars). It is shown to you at the start of every step, so use it to keep track of long multi-step tasks. Replaces the previous note.", {
-	text = P("STRING", "Plan / progress"),
-}, {"text"}, function(a)
-	notes = tostring(a.text or ""):sub(1, 3000)
-	return okr({saved = #notes})
-end)
-
-resolveForTag = resolve
-
 local function toolDecls()
 	local d = {}
 	for _, n in ipairs(ORDER) do table.insert(d, TOOLS[n].decl) end
 	return d
 end
 
--- ---------- undo ----------
-local function undoLast()
-	if busy then showToast("Stop the agent first") return end
-	local g
-	while #undoGroups > 0 do
-		g = table.remove(undoGroups)
-		if #g > 0 then break end
-		g = nil
-	end
-	if not g then showToast("Nothing to undo") return end
-	local n = 0
-	for i = #g, 1, -1 do
-		local e = g[i]
-		local okk = pcall(function()
-			if e.kind == "created" then
-				if e.inst then e.inst:Destroy() end
-			elseif e.kind == "deleted" then
-				if e.clone and e.parent then e.clone.Parent = e.parent end
-			elseif e.kind == "props" then
-				e.inst[e.key] = e.old
-			elseif e.kind == "attr" then
-				e.inst:SetAttribute(e.key, e.old)
-			elseif e.kind == "moved" then
-				e.inst.Parent = e.parent
-			elseif e.kind == "source" then
-				writeSource(e.inst, e.old or "")
-			end
-		end)
-		if okk then n += 1 end
-	end
-	showToast("Undid " .. n .. " change(s)")
-end
-
 -- ---------- system prompt ----------
-local SYSTEM_PROMPT = [==[You are RGC Agent, an autonomous Roblox building, scripting and map-design assistant inside the Studio Lite game (RGC Glass Creator Studio). You act through TOOLS and you never just describe what you would do.
+local SYSTEM_PROMPT = [==[You are the AI assistant of "Rage Hub Dev (Beta)", a script hub for Roblox. You chat with the user and you write Luau code. You work inside the Studio Lite game, running on the player's device through an executor.
 
-THE MOST IMPORTANT FACT: CLIENT vs SERVER
-- You run on the player's device (client, via an executor). Anything created by create_instance, create_script, set_property, clone/move/delete is CLIENT-ONLY: the server and other players cannot see it, server scripts cannot find it, and it disappears when the player rejoins. It is only good for a quick local preview or for testing.
-- Real, working changes must reach the SERVER. There are three ways, in this order of preference:
-  1. A server bridge: insert_asset already inserts models on the server through Studio Lite's own remotes. For other actions use call_remote, but ONLY with a format you have seen: read get_spy_log (the user records Studio Lite's own remote calls in the Bridge tab) or list_remotes. Never guess unknown remote arguments and never call remotes you do not understand.
-  2. Write the complete script in your reply, in a ```lua code block (one block per script). Say exactly where it goes (for example: Script in ServerScriptService, LocalScript in StarterPlayerScripts, ModuleScript in ReplicatedStorage). The user copies it with the Copy button and pastes it into Studio Lite's script editor, where it runs on the server for real. Prefer self-contained BUILDER scripts that create the parts, UI, lighting, sounds and logic by code, so one paste builds everything.
-  3. If the user only wants a quick look, you may make a client-only preview, and you must say it is local only.
-- NEVER say that something exists for the server, or that a script is installed, unless a tool result confirmed server_side=true or a successful call_remote. Be honest about what is client-only.
-- Reading works: you can inspect Workspace, ReplicatedStorage, StarterGui, Lighting and everything the client can replicate. ServerScriptService and ServerStorage contents are not visible to the client.
+WHAT YOU CAN DO
+- You have READ-ONLY tools: you can look at the game like the Dex/Explorer (list_children, get_tree, find_instances, get_properties), read scripts (read_script, search_scripts), see the game's remotes (list_remotes), read the console output (get_output), inspect the map and player (describe_map, get_player), and run a script locally to reproduce an error (run_script).
+- You can NOT add, change or delete anything in the game. You have no tool for creating scripts, parts, GUIs or remotes. The user copies and pastes your code themselves.
+- The game's remotes (for example in ReplicatedStorage/StudioLiteFolder) are already loaded when you run. When the user wants something that works with the game's systems, first LOOK: list_remotes, then search_scripts with a remote's name or a feature word, then read_script, so you understand how it is called before you write code that uses it. Never guess remote arguments you have not seen.
 
-HOW YOU WORK
-- Explore first (describe_map, get_tree, list_children, find_instances, read_script), then act, then verify. If a tool returns an error, read it and fix the cause. Never invent paths.
-- You may chain as many tool calls as you need. Every tool call needs VALID JSON arguments. Keep going until the task is done, then give a short summary: what you did, what is local vs real, and what the user must paste or do.
-- Paths look like Workspace/Folder/Part or ReplicatedStorage/Remotes. The first segment is a service. 'game' lists all services.
-- You can find Creator Store assets with search_assets and put them in the map with insert_asset (server side).
+WHEN THE USER ASKS YOU TO CREATE SOMETHING (a UI, a script, a system, a tool...)
+- Start with ONE short line saying you can't add scripts or objects to the game yourself, then write the complete script. Example in Taglish: "Wala akong tool para mag-add ng script sa game, pero heto ang script na pwede mong i-copy at i-paste." Use the user's language.
+- Then give the full working code in a single ```lua block (split into several blocks only if it is really huge, say "Part 1/2"). Say where it goes or how to run it (for example: run it in your executor, or LocalScript in StarterPlayerScripts).
+- Write complete, modern, working Luau: no placeholders, no "-- rest of code". Use clean, good-looking UI when asked for UI (rounded corners, dark theme, smooth tweens) and make it draggable and responsive when it makes sense.
 
-MAP ADVISOR
-- When the user asks what to add or improve, or asks if their map looks good: call describe_map (and get_tree on interesting parts), look at size, density, lighting, sky/atmosphere, sounds, spawns, then give concrete, specific recommendations grouped as: Look and feel (lighting, atmosphere, colors, props, decals), Gameplay (objectives, checkpoints, hazards, collectibles, NPCs, shops), Sound (ambience, music, effects), Performance. Be honest if it looks empty or messy. Offer to build the best ideas: with search_assets plus insert_asset for ready-made models, or with a builder script they can paste.
-
-WRITING LARGE CODE
-- Write complete, working, modern Luau (task.wait, no wait()). No placeholders like "-- rest of code". For very big systems split into several scripts/modules, each in its own code block.
-- If you use create_script for a local preview, keep each call under ~200 lines and use mode=append for the next parts.
+WHEN THE USER REPORTS AN ERROR IN A SCRIPT ("my admin panel has an error, fix it")
+1. Call get_output (only_errors=true) to see the latest errors and their line numbers.
+2. If the user pasted the script it has an id such as user_script_1: call run_script with that script_id to reproduce the problem and read the real error. If the script is in the game, use read_script or search_scripts to read it.
+3. Find the real cause. Check the line numbers against the script.
+4. Reply with the COMPLETE updated script in one ```lua block (or numbered parts if it is very long). Change ONLY what is needed for the fix. Keep every UI element, feature, name, color, layout and behavior exactly as it was: do not redesign, rename, remove or "improve" anything else.
+5. After the code, list briefly what you changed (line or function, and why). Do not add anything else.
+- If the output shows no error and the script runs fine, say so and ask what is wrong.
 
 STYLE
-- Be concise. Reply in the language the user writes (they may use Tagalog or Taglish).
+- Be concise and direct. Reply in the language the user writes (they often write Tagalog or Taglish).
 - If a request is ambiguous, decide sensibly and proceed; ask only when truly blocked.
-- For long tasks keep a short plan with save_notes (shown to you at the start of every step).]==]
+- Every tool call needs VALID JSON arguments. Keep tool use focused: only look at what you need.
+- When asked about the map (what to add, does it look good), use describe_map and get_tree, then give concrete recommendations (look and feel, gameplay, sound, performance) and offer to write a script for the best ideas.]==]
 
 local function systemText()
-	local s = SYSTEM_PROMPT .. "\n\nPROJECT FOLDER: " .. pathOf(projectRoot)
-	if notes ~= "" then s ..= "\n\nYOUR SAVED NOTES / PLAN:\n" .. notes end
-	if not setting("fullAccess", true) then s ..= "\n\nNOTE: 'Allow all access' is OFF: you may only modify things inside " .. pathOf(projectRoot) .. " and run_script is disabled." end
+	local s = SYSTEM_PROMPT
+	if not setting("allowRun", true) then s ..= "\n\nNOTE: the user turned OFF running scripts, so run_script is unavailable." end
 	return s
 end
 
 -- ---------- context size control ----------
 local CTX_LIMIT = 260000
-local MAX_STEPS = 200
-local OR_URL = "https://openrouter.ai/api/v1/chat/completions"
-local OR_DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl:free"
+local MAX_STEPS = 120
+local NV_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+local NV_DEFAULT_MODEL = "z-ai/glm-5.3-flash"
 local function strSize(v)
 	local t = type(v)
 	if t == "string" then return #v end
@@ -2684,10 +1832,10 @@ local function dropOldest()
 	return false
 end
 
--- ---------- OpenRouter request ----------
+-- ---------- NVIDIA API request (OpenAI-compatible) ----------
 local function modelName()
-	local m = db.set.orModel
-	return (type(m) == "string" and m ~= "") and m or OR_DEFAULT_MODEL
+	local m = db.set.nvModel
+	return (type(m) == "string" and m ~= "") and m or NV_DEFAULT_MODEL
 end
 local function lowerTypes(v)
 	if type(v) ~= "table" then return v end
@@ -2711,7 +1859,7 @@ end
 local setStatus
 local function llmRequest(maxTokens)
 	local key = getKey()
-	if key == "" then return nil, "No OpenRouter API key. Open Settings (gear) and paste one." end
+	if key == "" then return nil, "No NVIDIA API key. Open Settings (gear) and paste your key (starts with nvapi-)." end
 	local msgs = {{role = "system", content = systemText()}}
 	for _, m in ipairs(history) do table.insert(msgs, m) end
 	local payload = {model = modelName(), messages = msgs, tools = toolList(), tool_choice = "auto", max_tokens = maxTokens, temperature = 0.4}
@@ -2721,8 +1869,8 @@ local function llmRequest(maxTokens)
 	for attempt = 1, 6 do
 		if stopFlag then return nil, "Stopped" end
 		local res = doRequest({
-			Url = OR_URL, Method = "POST",
-			Headers = {["Content-Type"] = "application/json", ["Authorization"] = "Bearer " .. key, ["HTTP-Referer"] = "https://github.com/devnamegelo", ["X-Title"] = "RGC Glass Creator Studio"},
+			Url = NV_URL, Method = "POST",
+			Headers = {["Content-Type"] = "application/json", ["Accept"] = "application/json", ["Authorization"] = "Bearer " .. key},
 			Body = body,
 		})
 		if not res then
@@ -2734,25 +1882,28 @@ local function llmRequest(maxTokens)
 			local okD, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
 			if not okD or type(data) ~= "table" then
 				lastErr = "Bad response (HTTP " .. status .. ")"
+				if status == 401 or status == 403 then return nil, "NVIDIA rejected the API key (HTTP " .. status .. "). Check that you pasted the full nvapi- key." end
 				task.wait(2)
-			elseif data.error or status >= 400 then
+			elseif data.error or (status >= 400 and not data.choices) then
 				local e = data.error
-				local msg = type(e) == "table" and tostring(e.message or e.code or "API error") or tostring(e or ("HTTP " .. status))
-				local code = (type(e) == "table" and tonumber(e.code)) or status
-				if type(e) == "table" and type(e.metadata) == "table" and e.metadata.raw then
-					msg = msg .. " (" .. tostring(e.metadata.raw):sub(1, 160) .. ")"
+				local msg
+				if type(e) == "table" then msg = tostring(e.message or e.code or "API error")
+				elseif e ~= nil then msg = tostring(e)
+				else msg = tostring(data.detail or data.message or data.title or ("HTTP " .. status)) end
+				if type(data.detail) == "table" then
+					local okJ, js = pcall(HttpService.JSONEncode, HttpService, data.detail)
+					if okJ then msg = msg .. " " .. js:sub(1, 160) end
 				end
+				local code = (type(e) == "table" and tonumber(e.code)) or status
 				lastErr = msg
-				local low = msg:lower()
-				if code == 429 then
-					if low:find("per%-day") or low:find("per day") or low:find("daily") then
-						return nil, "OpenRouter free daily limit reached (" .. msg .. "). Free models allow about 50 requests per day (1000 after buying $10 credits). Try again later."
-					end
+				if code == 401 or code == 403 then
+					return nil, "NVIDIA rejected the API key (HTTP " .. code .. "). Check that you pasted the full nvapi- key."
+				elseif code == 429 then
 					local w = math.min(6 * attempt, 40)
 					setStatus("Rate limited, waiting " .. w .. "s", C.warn)
 					task.wait(w)
 				elseif code >= 500 or code == 408 then
-					setStatus("Provider busy, retrying (" .. attempt .. ")", C.warn)
+					setStatus("Server busy, retrying (" .. attempt .. ")", C.warn)
 					task.wait(math.min(3 * attempt, 15))
 				else
 					return nil, msg, code
@@ -2765,32 +1916,33 @@ local function llmRequest(maxTokens)
 	return nil, lastErr
 end
 
+local currentCard = nil
+setStatus = function(text, color)
+	if currentCard then currentCard.setAction(text) end
+end
+
+
+
 -- ---------- chat UI ----------
 local header = new("Frame", {Size = UDim2.new(1, -16, 0, 30), Position = UDim2.fromOffset(8, 0), BackgroundTransparency = 1}, pAI)
-local btnRow = new("Frame", {Size = UDim2.new(0, 238, 1, 0), Position = UDim2.new(1, -238, 0, 0), BackgroundTransparency = 1}, header)
+local btnRow = new("Frame", {Size = UDim2.new(0, 190, 1, 0), Position = UDim2.new(1, -190, 0, 0), BackgroundTransparency = 1}, header)
 new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Right, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, btnRow)
-local stopBtn = btn(btnRow, "■ Stop", UDim2.fromOffset(58, 28), nil, C.bad, 11)
+local stopBtn = iconBtn(btnRow, "stop", "Stop", UDim2.fromOffset(66, 28), nil, C.bad, 11, 11)
 stopBtn.LayoutOrder = 1
 stopBtn.Visible = false
-local undoBtn = btn(btnRow, "↶ Undo", UDim2.fromOffset(60, 28), nil, C.card, 11)
-undoBtn.LayoutOrder = 2
-local clearBtn = btn(btnRow, "Clear", UDim2.fromOffset(52, 28), nil, C.card, 11)
-clearBtn.LayoutOrder = 3
-local setBtn = btn(btnRow, "⚙", UDim2.fromOffset(34, 28), nil, C.card, 14)
-setBtn.LayoutOrder = 4
-local statusLbl = label(header, "● Ready", UDim2.new(1, -246, 1, 0), nil, C.good, 11, Enum.Font.GothamMedium)
-statusLbl.TextWrapped = false
-statusLbl.TextTruncate = Enum.TextTruncate.AtEnd
-setStatus = function(text, color)
-	statusLbl.Text = "● " .. text
-	statusLbl.TextColor3 = color or C.good
-end
+local clearBtn = iconBtn(btnRow, "trash", "Clear", UDim2.fromOffset(66, 28), nil, C.card, 11, 12)
+clearBtn.LayoutOrder = 2
+local setBtn = iconBtn(btnRow, "gear", "", UDim2.fromOffset(34, 28), nil, C.card, 11, 15)
+setBtn.LayoutOrder = 3
+local modelLbl = label(header, "", UDim2.new(1, -198, 1, 0), nil, C.sub, 11, Enum.Font.GothamMedium)
+modelLbl.TextWrapped = false
+modelLbl.TextTruncate = Enum.TextTruncate.AtEnd
 
 local chatScroll = vscroll(pAI, UDim2.new(1, -16, 1, -112), UDim2.fromOffset(8, 34))
 new("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, chatScroll)
 local chips = hscroll(pAI, UDim2.new(1, -16, 0, 26), UDim2.new(0, 8, 1, -74))
-local inputBox = box(pAI, "Tell the agent what to build or fix...", UDim2.new(1, -84, 0, 38), UDim2.new(0, 8, 1, -42), true)
-local sendBtn = btn(pAI, "Send ➤", UDim2.fromOffset(68, 38), UDim2.new(1, -76, 1, -42), C.accent, 13)
+local inputBox = box(pAI, "Ask anything, or paste a script to fix...", UDim2.new(1, -92, 0, 38), UDim2.new(0, 8, 1, -42), true)
+local sendBtn = iconBtn(pAI, "send", "Send", UDim2.fromOffset(76, 38), UDim2.new(1, -84, 1, -42), C.accent, 13, 14)
 
 local msgOrder = 0
 local TXT_CHUNK = 2400
@@ -2838,7 +1990,7 @@ local function addCodeBlock(parent, code, order)
 	local nLines = 1
 	for _ in code:gmatch("\n") do nLines += 1 end
 	local head = new("Frame", {Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1, LayoutOrder = 1}, cf)
-	label(head, "lua · " .. nLines .. " lines", UDim2.new(1, -140, 1, 0), nil, C.sub, 10, Enum.Font.Code)
+	label(head, "lua - " .. nLines .. " lines", UDim2.new(1, -140, 1, 0), nil, C.sub, 10, Enum.Font.Code)
 	local cp = btn(head, "Copy", UDim2.fromOffset(56, 22), UDim2.new(1, -56, 0, 1), C.accent, 11)
 	local ex = btn(head, "Expand", UDim2.fromOffset(62, 22), UDim2.new(1, -122, 0, 1), C.card, 11)
 	local bodyF = new("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 2}, cf)
@@ -2881,23 +2033,45 @@ local function parseBlocks(text)
 	return out
 end
 
+
+
+-- code registry: pasted / written scripts get ids so run_script can use them
+local function looksLikeCode(text)
+	if lineCount(text) < 6 then return false end
+	return text:find("local%s+[%w_]+%s*=") ~= nil or text:find("function%s*[%w_%.:]*%(") ~= nil or text:find("game:GetService") ~= nil
+end
+local function registerCode(text, origin)
+	local ids = {}
+	local found = false
+	for _, b in ipairs(parseBlocks(text)) do
+		if b.t == "code" and #trim(b.v) > 60 then
+			found = true
+			codeCount[origin] += 1
+			local id = origin .. "_script_" .. codeCount[origin]
+			codeStore[id] = {source = trim(b.v), lines = lineCount(trim(b.v))}
+			ids[#ids + 1] = id .. " (" .. codeStore[id].lines .. " lines)"
+		end
+	end
+	if not found and origin == "user" and looksLikeCode(text) then
+		codeCount[origin] += 1
+		local id = origin .. "_script_" .. codeCount[origin]
+		codeStore[id] = {source = trim(text), lines = lineCount(trim(text))}
+		ids[#ids + 1] = id .. " (" .. codeStore[id].lines .. " lines)"
+	end
+	return table.concat(ids, ", ")
+end
+
 local function addMessage(role, text)
 	msgOrder += 1
 	local isUser = role == "user"
 	local f = round(new("Frame", {
-		Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BorderSizePixel = 0,
+		Size = UDim2.new(isUser and 0.88 or 1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BorderSizePixel = 0,
 		BackgroundColor3 = isUser and Color3.fromRGB(50, 80, 140) or C.bar, LayoutOrder = msgOrder,
 	}, chatScroll), 12)
 	f.BackgroundTransparency = isUser and 0.2 or 0.35
 	pad(f, 7)
 	listLayout(f, 4)
-	if isUser then
-		f.Size = UDim2.new(0.86, 0, 0, 0)
-		f.Position = UDim2.new(0.14, -6, 0, 0)
-	end
-	if role == "sys" then
-		f.BackgroundColor3 = Color3.fromRGB(90, 40, 50)
-	end
+	if role == "sys" then f.BackgroundColor3 = Color3.fromRGB(90, 40, 50) end
 	local n = 0
 	for _, b in ipairs(parseBlocks(text)) do
 		local v = trim(b.v)
@@ -2928,51 +2102,136 @@ local function toJson(v)
 	local okk, s = pcall(HttpService.JSONEncode, HttpService, clip(v, 300))
 	return okk and s or tostring(v)
 end
-local ICON = {list_children = "📂", get_tree = "🌳", find_instances = "🔎", get_properties = "📋", set_property = "✏️", create_instance = "🧱", create_script = "📜", read_script = "📖", edit_script = "🛠", edit_script_lines = "🛠", delete_instance = "🗑", move_instance = "↦", clone_instance = "⧉", run_script = "▶", stop_scripts = "■", get_output = "🖥", get_player = "🧍", search_assets = "🛍", insert_asset = "📥", save_notes = "📝"}
+
+
+-- ---------- run card: Thinking -> Summary with live timer ----------
+local function fmtDur(s)
+	if s < 10 then return ("%.1fs"):format(s) end
+	if s < 60 then return ("%ds"):format(math.floor(s)) end
+	return ("%dm %02ds"):format(math.floor(s / 60), math.floor(s % 60))
+end
+local VERB = {
+	list_children = "Listing", get_tree = "Scanning", find_instances = "Searching", get_properties = "Inspecting",
+	read_script = "Reading script", search_scripts = "Searching scripts", list_remotes = "Checking remotes",
+	get_output = "Reading output", run_script = "Running script", stop_scripts = "Stopping scripts",
+	get_player = "Checking player", describe_map = "Analyzing map",
+}
 local function argSummary(args)
-	for _, k in ipairs({"path", "parent", "root", "query", "asset_id", "class_name"}) do
-		if args[k] ~= nil then
-			local s = tostring(args[k])
-			if k == "parent" and args.name then s = s .. "/" .. tostring(args.name) end
-			if k == "class_name" and args.name then s = s .. " '" .. tostring(args.name) .. "'" end
-			return s
-		end
+	for _, k in ipairs({"path", "root", "script_id", "query", "contains"}) do
+		if args[k] ~= nil then return tostring(args[k]) end
 	end
 	return ""
 end
-local function addToolCard(name, args)
+local function newRunCard()
 	msgOrder += 1
-	local card = round(new("Frame", {Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.card, BorderSizePixel = 0, LayoutOrder = msgOrder}, chatScroll), 9)
-	card.BackgroundTransparency = 0.45
+	local card = round(new("Frame", {Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.bar, BorderSizePixel = 0, LayoutOrder = msgOrder}, chatScroll), 12)
+	card.BackgroundTransparency = 0.3
 	listLayout(card, 0)
-	local row = new("TextButton", {
-		Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, Text = "⏳ " .. (ICON[name] or "⚙") .. " " .. name .. "  " .. argSummary(args),
-		TextColor3 = C.sub, Font = Enum.Font.GothamMedium, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
-		TextTruncate = Enum.TextTruncate.AtEnd, AutoButtonColor = false, LayoutOrder = 1,
-	}, card)
-	new("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8)}, row)
-	local detail = label(card, "", UDim2.new(1, 0, 0, 0), nil, C.sub, 10, Enum.Font.Code)
-	detail.AutomaticSize = Enum.AutomaticSize.Y
-	detail.TextYAlignment = Enum.TextYAlignment.Top
-	detail.Visible = false
-	detail.LayoutOrder = 2
-	new("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 6)}, detail)
-	local argText = toJson(args)
-	detail.Text = "args: " .. argText
-	row.MouseButton1Click:Connect(function() detail.Visible = not detail.Visible end)
-	trimChat()
-	scrollBottom()
-	return function(res)
-		local good = res and res.ok ~= false
-		row.Text = (good and "✓ " or "✗ ") .. (ICON[name] or "⚙") .. " " .. name .. "  " .. argSummary(args)
-		row.TextColor3 = good and C.good or C.bad
-		local shown = toJson(res)
-		if #shown > 1200 then shown = shown:sub(1, 1200) .. "..." end
-		detail.Text = "args: " .. argText .. "\nresult: " .. shown
-		if not good and res and res.error then
-			detail.Visible = true
+	local head = new("TextButton", {Size = UDim2.new(1, 0, 0, 32), BackgroundTransparency = 1, Text = "", AutoButtonColor = false, LayoutOrder = 1}, card)
+	local dots = {}
+	for i = 1, 3 do
+		local d = new("Frame", {Size = UDim2.fromOffset(6, 6), Position = UDim2.new(0, 12 + (i - 1) * 10, 0.5, -3), BackgroundColor3 = C.accent, BorderSizePixel = 0}, head)
+		new("UICorner", {CornerRadius = UDim.new(1, 0)}, d)
+		dots[i] = d
+	end
+	local title = label(head, "Thinking", UDim2.new(1, -150, 1, 0), UDim2.fromOffset(46, 0), C.text, 13, Enum.Font.GothamBold)
+	title.TextWrapped = false
+	local timer = label(head, "0.0s", UDim2.fromOffset(70, 32), UDim2.new(1, -96, 0, 0), C.sub, 12, Enum.Font.Code)
+	timer.TextXAlignment = Enum.TextXAlignment.Right
+	local chevHolder = new("Frame", {BackgroundTransparency = 1, Size = UDim2.fromOffset(12, 12), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(1, -14, 0.5, 0)}, head)
+	local chev = makeIcon("chevron", chevHolder, 12, C.sub)
+	local action = label(card, "Starting...", UDim2.new(1, 0, 0, 0), nil, C.sub, 11)
+	action.AutomaticSize = Enum.AutomaticSize.Y
+	action.TextWrapped = false
+	action.TextTruncate = Enum.TextTruncate.AtEnd
+	action.LayoutOrder = 2
+	new("UIPadding", {PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12), PaddingBottom = UDim.new(0, 8)}, action)
+	local bodyF = new("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Visible = false, LayoutOrder = 3}, card)
+	listLayout(bodyF, 3)
+	new("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8)}, bodyF)
+	head.MouseButton1Click:Connect(function()
+		bodyF.Visible = not bodyF.Visible
+		chev.Rotation = bodyF.Visible and 90 or 0
+	end)
+
+	local rc = {t0 = os.clock(), steps = 0, reads = 0, runs = 0, finished = false}
+	local bodyOrder = 0
+	task.spawn(function()
+		while not rc.finished and card.Parent do
+			local e = os.clock() - rc.t0
+			timer.Text = fmtDur(e)
+			for i, d in ipairs(dots) do
+				d.BackgroundTransparency = 0.1 + 0.75 * (0.5 + 0.5 * math.sin(e * 5 - i * 0.9))
+			end
+			task.wait(0.2)
+		end
+	end)
+	function rc.setAction(text)
+		if not rc.finished then action.Text = text end
+	end
+	function rc.addNote(text)
+		if not text or trim(text) == "" then return end
+		bodyOrder += 1
+		local l = label(bodyF, "Thinking notes: " .. trim(text):sub(1, 1200), UDim2.new(1, 0, 0, 0), nil, C.sub, 10, Enum.Font.Gotham)
+		l.AutomaticSize = Enum.AutomaticSize.Y
+		l.TextYAlignment = Enum.TextYAlignment.Top
+		l.LayoutOrder = bodyOrder
+	end
+	function rc.addStep(name, args)
+		rc.steps += 1
+		if name == "run_script" then rc.runs += 1 else rc.reads += 1 end
+		bodyOrder += 1
+		local row = new("TextButton", {
+			Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, Text = (VERB[name] or name) .. "  " .. argSummary(args),
+			TextColor3 = C.text, Font = Enum.Font.GothamMedium, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd, AutoButtonColor = false, LayoutOrder = bodyOrder,
+		}, bodyF)
+		new("UIPadding", {PaddingLeft = UDim.new(0, 16)}, row)
+		local ind = new("Frame", {Size = UDim2.fromOffset(7, 7), Position = UDim2.new(0, 2, 0.5, -3), BackgroundColor3 = C.warn, BorderSizePixel = 0}, row)
+		new("UICorner", {CornerRadius = UDim.new(1, 0)}, ind)
+		bodyOrder += 1
+		local detailL = label(bodyF, "", UDim2.new(1, 0, 0, 0), nil, C.sub, 10, Enum.Font.Code)
+		detailL.AutomaticSize = Enum.AutomaticSize.Y
+		detailL.TextYAlignment = Enum.TextYAlignment.Top
+		detailL.Visible = false
+		detailL.LayoutOrder = bodyOrder
+		local argText = toJson(args)
+		detailL.Text = "args: " .. argText
+		row.MouseButton1Click:Connect(function() detailL.Visible = not detailL.Visible end)
+		rc.setAction((VERB[name] or name) .. "  " .. argSummary(args))
+		return function(res)
+			local good = res and res.ok ~= false
+			ind.BackgroundColor3 = good and C.good or C.bad
+			local shown = toJson(res)
+			if #shown > 1200 then shown = shown:sub(1, 1200) .. "..." end
+			detailL.Text = "args: " .. argText .. "\nresult: " .. shown
 		end
 	end
+	function rc.finish(kind)
+		if rc.finished then return end
+		rc.finished = true
+		local e = os.clock() - rc.t0
+		timer.Text = fmtDur(e)
+		local good = kind == "done"
+		title.Text = good and "Summary" or (kind == "stopped" and "Stopped" or "Stopped by error")
+		title.TextColor3 = good and C.good or (kind == "stopped" and C.warn or C.bad)
+		for _, d in ipairs(dots) do
+			d.BackgroundTransparency = 0
+			d.BackgroundColor3 = good and C.good or (kind == "stopped" and C.warn or C.bad)
+		end
+		local parts = {}
+		if rc.reads > 0 then table.insert(parts, rc.reads .. (rc.reads == 1 and " check" or " checks")) end
+		if rc.runs > 0 then table.insert(parts, rc.runs .. (rc.runs == 1 and " test run" or " test runs")) end
+		if #parts == 0 then
+			action.Text = "Replied in " .. fmtDur(e)
+		else
+			action.Text = "Worked for " .. fmtDur(e) .. " - " .. table.concat(parts, ", ")
+		end
+		action.TextColor3 = C.sub
+	end
+	trimChat()
+	scrollBottom()
+	return rc
 end
 
 -- ---------- tool execution ----------
@@ -2985,7 +2244,7 @@ local function execTool(name, args)
 	if type(res) ~= "table" then res = okr({result = tostring(res)}) end
 	local okJ, js = pcall(HttpService.JSONEncode, HttpService, res)
 	if okJ and #js > 24000 then
-		return {ok = true, truncated = true, partial = js:sub(1, 20000), note = "Result too large. Narrow your request (smaller depth/limit/line range)."}
+		return {ok = true, truncated = true, partial = js:sub(1, 20000), note = "Result too large. Narrow the request (smaller depth/limit/line range)."}
 	end
 	return res
 end
@@ -3003,27 +2262,25 @@ end
 local function setBusy(v)
 	busy = v
 	stopBtn.Visible = v
-	sendBtn.Text = v and "Send ↪" or "Send ➤"
-	if not v then setStatus("Ready", C.good) end
 end
 
-local function agentLoop()
+local function agentLoop(rc)
 	local step, bad = 0, 0
-	local maxTokens = 20000
+	local maxTokens = 16384
 	while not stopFlag do
 		step += 1
 		if step > MAX_STEPS then
 			addMessage("sys", "Reached the step limit (" .. MAX_STEPS .. "). Send \"continue\" to keep going.")
-			return
+			return "done"
 		end
 		compact()
-		setStatus("Thinking... (step " .. step .. ")", C.accent)
+		rc.setAction("Thinking (step " .. step .. ")")
 		local data, err = llmRequest(maxTokens)
 		if not data then
-			if stopFlag then return end
+			if stopFlag then return "stopped" end
 			local low = tostring(err):lower()
-			if maxTokens > 6000 and (low:find("max_tokens") or low:find("max tokens") or low:find("completion tokens")) then
-				maxTokens = 6000
+			if maxTokens > 4096 and (low:find("max_tokens") or low:find("max tokens") or low:find("completion tokens") or low:find("max_completion")) then
+				maxTokens = 4096
 				step -= 1
 				continue
 			end
@@ -3035,18 +2292,20 @@ local function agentLoop()
 				end
 			end
 			addMessage("sys", "Error: " .. tostring(err))
-			return
+			return "error"
 		end
 		local choice = data.choices and data.choices[1]
 		local msg = choice and choice.message
 		if type(msg) ~= "table" then
 			bad += 1
-			if bad > 2 then addMessage("sys", "The model returned nothing. Try again or rephrase.") return end
+			if bad > 2 then addMessage("sys", "The model returned nothing. Try again or rephrase.") return "error" end
 			task.wait(2)
 			continue
 		end
 		local finish = choice.finish_reason
-		local text = type(msg.content) == "string" and trim(msg.content) or ""
+		local text = type(msg.content) == "string" and trim((msg.content:gsub("<think>.-</think>", ""))) or ""
+		local thought = msg.reasoning_content or msg.reasoning
+		if type(thought) == "string" then rc.addNote(thought) end
 		local calls = {}
 		if type(msg.tool_calls) == "table" then
 			for i, tc in ipairs(msg.tool_calls) do
@@ -3062,7 +2321,10 @@ local function agentLoop()
 				end
 			end
 		end
-		if text ~= "" then addMessage("model", text) end
+		if text ~= "" then
+			addMessage("model", text)
+			registerCode(text, "ai")
+		end
 		local stored = {role = "assistant"}
 		if text ~= "" then stored.content = text end
 		if #calls > 0 then
@@ -3070,12 +2332,11 @@ local function agentLoop()
 			for _, c in ipairs(calls) do
 				table.insert(stored.tool_calls, {id = c.id, type = "function", ["function"] = {name = c.name, arguments = c.argStr}})
 			end
-			if msg.reasoning_details then stored.reasoning_details = msg.reasoning_details end
 		end
 		if #calls == 0 then
 			if text == "" then
 				bad += 1
-				if bad > 2 then addMessage("sys", "The model returned an empty reply" .. (finish and (" (" .. tostring(finish) .. ")") or "") .. ". Try again.") return end
+				if bad > 2 then addMessage("sys", "The model returned an empty reply" .. (finish and (" (" .. tostring(finish) .. ")") or "") .. ". Try again.") return "error" end
 				pushUserText("Your last reply was empty. Continue the task: call a tool, or give the final answer.")
 			else
 				bad = 0
@@ -3085,7 +2346,7 @@ local function agentLoop()
 				elseif #pendingUser > 0 then
 					pushUserText(table.remove(pendingUser, 1))
 				else
-					return
+					return "done"
 				end
 			end
 		else
@@ -3094,13 +2355,12 @@ local function agentLoop()
 			for _, c in ipairs(calls) do
 				local okA, args = pcall(HttpService.JSONDecode, HttpService, c.argStr)
 				local result
-				local done = addToolCard(c.name, okA and type(args) == "table" and args or {})
+				local done = rc.addStep(c.name, okA and type(args) == "table" and args or {})
 				if stopFlag then
 					result = fail("Stopped by the user")
 				elseif not okA or type(args) ~= "table" then
-					result = fail("Invalid JSON in tool arguments (the output was probably cut off). Retry with a smaller piece: max ~150 lines per create_script call, then mode=append.")
+					result = fail("Invalid JSON in tool arguments (the output was probably cut off). Retry with simpler arguments.")
 				else
-					setStatus("Step " .. step .. " · " .. tostring(c.name), C.accent)
 					result = execTool(c.name, args)
 				end
 				done(result)
@@ -3110,21 +2370,26 @@ local function agentLoop()
 			while #pendingUser > 0 do
 				pushUserText("USER (sent while you were working): " .. table.remove(pendingUser, 1))
 			end
-			task.wait(0.15)
+			task.wait(0.1)
 		end
 	end
+	return "stopped"
 end
 
 local function runAgent()
 	setBusy(true)
 	stopFlag = false
-	local okk, e = pcall(agentLoop)
-	if not okk then addMessage("sys", "Agent crashed: " .. tostring(e)) end
-	setBusy(false)
-	if stopFlag then
-		addMessage("sys", "Stopped.")
-		stopFlag = false
+	local rc = newRunCard()
+	currentCard = rc
+	local okk, result = pcall(agentLoop, rc)
+	if not okk then
+		addMessage("sys", "Assistant crashed: " .. tostring(result))
+		result = "error"
 	end
+	rc.finish(result)
+	currentCard = nil
+	setBusy(false)
+	stopFlag = false
 end
 
 -- ---------- settings panel ----------
@@ -3142,26 +2407,32 @@ local function sLabel(t)
 	l.ZIndex = 10
 	return l
 end
-sLabel("OpenRouter API key (saved only on this device)")
-local keyBox = box(setScroll, getKey() ~= "" and "Saved - type to replace" or "sk-or-v1-...", UDim2.new(1, -6, 0, 34))
+sLabel("NVIDIA API key (starts with nvapi-). Get a free one at build.nvidia.com. Saved only on this device. Long-press the box to paste.")
+local keyBox = box(setScroll, "nvapi-...", UDim2.new(1, -6, 0, 38))
 keyBox.LayoutOrder = sNext()
 keyBox.ZIndex = 10
+keyBox.TextSize = 12
+keyBox.Font = Enum.Font.Code
+keyBox.Text = getKey()
 sLabel("Model")
-local modelBox = box(setScroll, OR_DEFAULT_MODEL, UDim2.new(1, -6, 0, 34))
+local modelBox = box(setScroll, NV_DEFAULT_MODEL, UDim2.new(1, -6, 0, 34))
 modelBox.LayoutOrder = sNext()
 modelBox.ZIndex = 10
-modelBox.Text = (type(db.set.orModel) == "string" and db.set.orModel ~= "") and db.set.orModel or OR_DEFAULT_MODEL
+modelBox.Text = (type(db.set.nvModel) == "string" and db.set.nvModel ~= "") and db.set.nvModel or NV_DEFAULT_MODEL
+local function refreshModelLabel()
+	modelLbl.Text = modelName()
+end
 do
 	local b = btn(setScroll, "", UDim2.new(1, -6, 0, 36), nil, C.card, 12)
 	b.LayoutOrder = sNext()
 	b.ZIndex = 10
 	local function paint()
-		local on = setting("fullAccess", true)
-		b.Text = "Allow all access (read & write):  " .. (on and "ON" or "OFF")
+		local on = setting("allowRun", true)
+		b.Text = "Allow AI to run scripts for testing:  " .. (on and "ON" or "OFF")
 		b.BackgroundColor3 = on and C.accent or C.card
 	end
 	b.MouseButton1Click:Connect(function()
-		db.set.fullAccess = not setting("fullAccess", true)
+		db.set.allowRun = not setting("allowRun", true)
 		saveDB()
 		paint()
 	end)
@@ -3171,20 +2442,19 @@ local saveKeyBtn = btn(setScroll, "Save", UDim2.new(1, -6, 0, 38), nil, C.good, 
 saveKeyBtn.LayoutOrder = sNext()
 saveKeyBtn.ZIndex = 10
 saveKeyBtn.MouseButton1Click:Connect(function()
-	local k = trim(keyBox.Text)
-	if k ~= "" then
-		db.set.orKey = k
-		keyBox.Text = ""
-		keyBox.PlaceholderText = "Saved - type to replace"
-	end
+	local k = trim(keyBox.Text):gsub("^[Bb]earer%s+", ""):gsub("[%s\"']", "")
+	db.set.nvKey = k
+	keyBox.Text = k
 	local m = trim(modelBox.Text)
-	db.set.orModel = (m ~= "") and m or OR_DEFAULT_MODEL
-	modelBox.Text = db.set.orModel
+	db.set.nvModel = (m ~= "") and m or NV_DEFAULT_MODEL
+	modelBox.Text = db.set.nvModel
 	saveDB()
+	refreshModelLabel()
 	settingsPanel.Visible = false
-	showToast("AI settings saved")
+	showToast(k ~= "" and "AI settings saved" or "API key removed")
 end)
 setBtn.MouseButton1Click:Connect(function() settingsPanel.Visible = not settingsPanel.Visible end)
+refreshModelLabel()
 
 -- ---------- input wiring ----------
 local function submit()
@@ -3192,178 +2462,76 @@ local function submit()
 	if txt == "" then return end
 	if getKey() == "" then
 		settingsPanel.Visible = true
-		showToast("Add your OpenRouter API key first")
+		showToast("Add your NVIDIA API key first")
 		return
 	end
 	inputBox.Text = ""
 	addMessage("user", txt)
+	local note = registerCode(txt, "user")
+	local sendText = txt
+	if note ~= "" then
+		sendText = txt .. "\n\n[Detected pasted script saved as: " .. note .. ". Use run_script with script_id to test it.]"
+	end
 	if busy then
-		table.insert(pendingUser, txt)
-		showToast("Sent to the agent")
+		table.insert(pendingUser, sendText)
+		showToast("Sent to the assistant")
 		return
 	end
-	pushUserText(txt)
-	currentGroup = {}
-	table.insert(undoGroups, currentGroup)
-	while #undoGroups > 30 do table.remove(undoGroups, 1) end
+	pushUserText(sendText)
 	task.spawn(runAgent)
 end
 sendBtn.MouseButton1Click:Connect(submit)
 stopBtn.MouseButton1Click:Connect(function()
 	stopFlag = true
-	setStatus("Stopping...", C.warn)
+	if currentCard then currentCard.setAction("Stopping...") end
 end)
-undoBtn.MouseButton1Click:Connect(undoLast)
 clearBtn.MouseButton1Click:Connect(function()
-	if busy then showToast("Stop the agent first") return end
+	if busy then showToast("Stop the assistant first") return end
 	history = {}
 	pendingUser = {}
-	undoGroups, currentGroup = {}, nil
+	codeStore, codeCount = {}, {user = 0, ai = 0}
 	clearGui(chatScroll)
 	showToast("Chat cleared")
 end)
 
 for i, c in ipairs({
-	{"🗺 Review my map", "Look at my current map (describe_map and get_tree), tell me honestly how it looks, and recommend what to add or improve."},
-	{"🧱 Builder script", "Write me a builder script that creates a small obby with 10 platforms, a checkpoint and a kill brick. I'll paste it into Studio Lite."},
-	{"📜 Write a script", "Write a Script and a ModuleScript that give players a Coins leaderstat and a coin pickup system."},
-	{"🛍 Add models", "Search the Creator Store for a medieval house and insert the best match on the server."},
-	{"🔗 Learn the game", "List the remotes in ReplicatedStorage/StudioLiteFolder and tell me what each one probably does."},
+	{"Fix my script", "My script has an error. Check the output, find the cause and send me the complete fixed script. Keep every feature and the whole UI the same, only change the fix."},
+	{"Explore the game", "Look at Workspace, ReplicatedStorage, ServerScriptService, StarterGui and the remotes, then explain how this game is set up."},
+	{"Write a script", "Write a speed adjustment UI script (draggable, with a slider for WalkSpeed)."},
+	{"Map ideas", "Check my current map and recommend what I can add to make it better."},
 }) do
-	local chip = btn(chips, c[1], UDim2.fromOffset(#c[1] * 6 + 28, 24), nil, C.card, 11)
+	local chip = btn(chips, c[1], UDim2.fromOffset(#c[1] * 7 + 26, 24), nil, C.card, 11)
 	chip.LayoutOrder = i
 	chip.MouseButton1Click:Connect(function() inputBox.Text = c[2] inputBox:CaptureFocus() end)
 end
 
-aiPrefill = function(text)
-	inputBox.Text = text
-end
-addMessage("model", "Hi! I'm the RGC Agent. I can explore your map, review it and recommend what to add, search and insert Creator Store models on the server, and write complete scripts for you to paste into Studio Lite (real server scripts). Things I create directly are client-only previews, and I'll always tell you which is which. Add your OpenRouter key in ⚙ Settings to start.")
+addMessage("model", "Hi! I can chat, write scripts and fix errors. I can look at your game (Workspace, scripts, remotes, output) but I can't add anything to it myself: you copy my scripts and paste them. Add your NVIDIA API key in Settings to start.")
 
 end -- buildAIPage
 buildAIPage()
 
--- ===== BRIDGE PAGE (remote scanner + spy) =====
-local function buildBridgePage()
-	local pB = newPage("Bridge")
-	local info = label(pB, "Make REAL (server) changes: turn Spy ON, then use Studio Lite's own buttons (insert part, new script, set property...). The calls it sends are recorded here. Send them to the AI so it can repeat them.", UDim2.new(1, -16, 0, 44), UDim2.fromOffset(8, 0), C.sub, 11)
-	local row = new("Frame", {Size = UDim2.new(1, -16, 0, 30), Position = UDim2.fromOffset(8, 48), BackgroundTransparency = 1}, pB)
-	local function rb(i, text, color)
-		return btn(row, text, UDim2.new(0.2, -4, 1, 0), UDim2.new((i - 1) * 0.2, 0, 0, 0), color or C.card, 11)
-	end
-	local spyBtn = rb(1, "Spy: OFF")
-	local scanBtn = rb(2, "Scan remotes")
-	local copyBtn = rb(3, "Copy")
-	local sendBtn2 = rb(4, "Send to AI", C.accent)
-	local clearBtn2 = rb(5, "Clear")
-	local list = vscroll(pB, UDim2.new(1, -16, 1, -86), UDim2.fromOffset(8, 82))
-	new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, list)
-	local mode, order = "log", 0
-	local scanLines = {}
-
-	local function addRow(text, color, copyText)
-		order += 1
-		local r = round(new("TextButton", {
-			Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.bar, BackgroundTransparency = 0.4,
-			Text = #text > 700 and (text:sub(1, 700) .. "...") or text, TextColor3 = color or C.text, Font = Enum.Font.Code, TextSize = 10,
-			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true,
-			AutoButtonColor = false, LayoutOrder = order, BorderSizePixel = 0,
-		}, list), 8)
-		new("UIPadding", {PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4), PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)}, r)
-		r.MouseButton1Click:Connect(function() copyOut(copyText or text, "line") end)
-	end
-	local function render()
-		clearGui(list)
-		order = 0
-		if mode == "scan" then
-			if #scanLines == 0 then addRow("No remotes found.", C.sub) end
-			for _, l in ipairs(scanLines) do addRow(l, l:find("StudioLiteFolder") and C.good or C.text) end
-			return
-		end
-		if #spy.log == 0 then
-			addRow(spy.on and "Spy is ON. Now do something in Studio Lite (insert a part, create a script...). Calls will appear here." or "Nothing recorded yet. Turn Spy ON first.", C.sub)
-			return
-		end
-		local from = math.max(1, #spy.log - 80 + 1)
-		for i = from, #spy.log do addRow(spy.fmt(spy.log[i]), C.text) end
-		task.defer(function() list.CanvasPosition = Vector2.new(0, 1e7) end)
-	end
-	spy.onLog = function() if mode == "log" then render() end end
-
-	spyBtn.MouseButton1Click:Connect(function()
-		if not spy.on then
-			local ok, err = spy.install()
-			if not ok then showToast(tostring(err):sub(1, 80)) return end
-			spy.on = true
-			mode = "log"
-		else
-			spy.on = false
-		end
-		spyBtn.Text = spy.on and "Spy: ON" or "Spy: OFF"
-		spyBtn.BackgroundColor3 = spy.on and C.good or C.card
-		render()
-	end)
-	scanBtn.MouseButton1Click:Connect(function()
-		mode = "scan"
-		scanLines = {}
-		local found = scanRemotes(ReplicatedStorage, 250)
-		for _, r in ipairs(found) do scanLines[#scanLines + 1] = r.path .. "  [" .. r.class .. "]" end
-		render()
-		showToast(#found .. " remote(s) found")
-	end)
-	copyBtn.MouseButton1Click:Connect(function()
-		if mode == "scan" then
-			copyOut(table.concat(scanLines, "\n"), "remote list")
-		else
-			copyOut(spy.text(100), "recorded calls")
-		end
-	end)
-	sendBtn2.MouseButton1Click:Connect(function()
-		local text
-		if mode == "scan" then
-			text = "These are the remotes in this game. Tell me what each probably does and which ones can create parts/scripts/instances on the server:\n" .. table.concat(scanLines, "\n")
-		else
-			if #spy.log == 0 then showToast("Nothing recorded yet") return end
-			text = "I recorded these remote calls while using Studio Lite's own buttons (I did: <describe what you did>). Learn the format, then repeat/adapt it with call_remote, or tell me what you need:\n" .. spy.text(25)
-		end
-		if #text > 7000 then text = text:sub(1, 7000) .. "\n...(cut)" end
-		if aiPrefill then aiPrefill(text) end
-		if gotoTab then gotoTab("AI") end
-		showToast("Added to the AI input. Edit it and press Send")
-	end)
-	clearBtn2.MouseButton1Click:Connect(function()
-		spy.log = {}
-		scanLines = {}
-		render()
-	end)
-	render()
-end
-buildBridgePage()
-
 -- ===== Tabs =====
 local TABS = {
-	{"Store", "🛍 Store"},
-	{"Saved", "★ Saved"},
-	{"AI", "✦ AI Agent"},
-	{"Bridge", "🔗 Bridge"},
-	{"Snippets", "{ } Snippets"},
+	{"Store", "bag", "Store"},
+	{"Saved", "bookmark", "Saved"},
+	{"AI", "chat", "AI Assistant"},
 }
-local tabBtns = {}
+local tabBtns, tabIcons = {}, {}
 local function showTab(name)
 	for n, p in pairs(pages) do p.Visible = (n == name) end
 	for n, b in pairs(tabBtns) do
 		local on = (n == name)
 		b.BackgroundColor3 = on and C.accent or C.card
 		b.TextColor3 = on and Color3.new(1, 1, 1) or C.sub
+		setIconColor(tabIcons[n], b.TextColor3)
 	end
-	if name == "Saved" then refreshSaved() end
+	if name == "Saved" and refreshSaved then refreshSaved() end
 end
-gotoTab = showTab
 for i, t in ipairs(TABS) do
-	local b = btn(tabBar, t[2], UDim2.fromOffset(#t[2] * 7 + 34, 28), nil, C.card, 12)
+	local b, ic = iconBtn(tabBar, t[2], t[3], UDim2.fromOffset(#t[3] * 8 + 46, 28), nil, C.card, 12, 14)
 	b.LayoutOrder = i
-	b.TextColor3 = C.sub
 	tabBtns[t[1]] = b
+	tabIcons[t[1]] = ic
 	b.MouseButton1Click:Connect(function() showTab(t[1]) end)
 end
 
