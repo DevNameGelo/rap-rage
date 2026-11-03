@@ -1,4 +1,4 @@
-print("[RGC Glass Creator Studio] v2.1 loaded - OpenRouter agent, Sound FX / Music split")
+print("[RGC Glass Creator Studio] v2.2 loaded - server insert + Bridge tab")
 -- RGC Glass Creator Studio v2 | DevNameGelo · RGC
 -- AI Agent with real tool calling (Gemini function calling), glass UI, Creator Store browser
 local Players = game:GetService("Players")
@@ -458,6 +458,222 @@ end
 hookCamera()
 Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function() hookCamera() apply() end)
 
+
+-- ===== Server bridge (remotes) =====
+-- An executor only runs on the client. Anything created here is invisible to the server.
+-- To make REAL changes we call the game's own remotes (Studio Lite has them).
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local function instPath(inst)
+	if inst == game then return "game" end
+	local parts, cur = {}, inst
+	while cur and cur ~= game do
+		table.insert(parts, 1, cur.Name)
+		cur = cur.Parent
+	end
+	if cur ~= game then return "(detached)/" .. table.concat(parts, "/") end
+	return table.concat(parts, "/")
+end
+
+-- Values <-> JSON-friendly tagged values ("v3:1,2,3", "inst:Workspace/Part", ...)
+local function toTagged(v, depth)
+	depth = depth or 0
+	local t = typeof(v)
+	if t == "string" or t == "number" or t == "boolean" then return v end
+	if t == "nil" then return "nil:" end
+	if t == "Vector3" then return ("v3:%g,%g,%g"):format(v.X, v.Y, v.Z) end
+	if t == "Vector2" then return ("v2:%g,%g"):format(v.X, v.Y) end
+	if t == "Color3" then return ("c3:%d,%d,%d"):format(math.round(v.R * 255), math.round(v.G * 255), math.round(v.B * 255)) end
+	if t == "CFrame" then
+		local c = {v:GetComponents()}
+		for i, n in ipairs(c) do c[i] = ("%g"):format(n) end
+		return "cf:" .. table.concat(c, ",")
+	end
+	if t == "Instance" then return "inst:" .. instPath(v) end
+	if t == "EnumItem" then return "enum:" .. tostring(v) end
+	if t == "table" then
+		if depth >= 3 then return "<table too deep>" end
+		local out, n, isArray = {}, 0, true
+		for k in pairs(v) do
+			n += 1
+			if type(k) ~= "number" then isArray = false end
+		end
+		if n > 40 then return "<table with " .. n .. " entries>" end
+		if isArray then
+			for i = 1, #v do out[i] = toTagged(v[i], depth + 1) end
+		else
+			for k, x in pairs(v) do out[tostring(k)] = toTagged(x, depth + 1) end
+		end
+		return out
+	end
+	return "<" .. t .. ">"
+end
+local function numsIn(s)
+	local t = {}
+	for n in tostring(s):gmatch("[-+]?%d*%.?%d+") do table.insert(t, tonumber(n)) end
+	return t
+end
+local resolveForTag -- set later (needs path resolver)
+local function fromTagged(v)
+	if type(v) == "string" then
+		if v == "nil:" then return nil end
+		local p = v:sub(1, 3)
+		local rest = v:sub(4)
+		if p == "v3:" then local n = numsIn(rest) return Vector3.new(n[1] or 0, n[2] or 0, n[3] or 0) end
+		if p == "v2:" then local n = numsIn(rest) return Vector2.new(n[1] or 0, n[2] or 0) end
+		if p == "c3:" then local n = numsIn(rest) return Color3.fromRGB(n[1] or 0, n[2] or 0, n[3] or 0) end
+		if p == "cf:" then
+			local n = numsIn(rest)
+			if #n == 12 then return CFrame.new(unpack(n)) end
+			return CFrame.new(n[1] or 0, n[2] or 0, n[3] or 0)
+		end
+		if v:sub(1, 5) == "inst:" then
+			local inst = resolveForTag and resolveForTag(v:sub(6))
+			return inst
+		end
+		return v
+	elseif type(v) == "table" then
+		local out = {}
+		for k, x in pairs(v) do out[k] = fromTagged(x) end
+		return out
+	end
+	return v
+end
+local function jsonOf(v)
+	local ok, s = pcall(HttpService.JSONEncode, HttpService, v)
+	return ok and s or tostring(v)
+end
+local function argsToJson(args, n)
+	local list = {}
+	for i = 1, n do list[i] = toTagged(args[i], 0) end
+	return jsonOf(list)
+end
+
+local spy = {on = false, ignore = false, hooked = false, log = {}, onLog = nil}
+function spy.install()
+	if spy.hooked then return true end
+	if not (hookmetamethod and getnamecallmethod) then
+		return false, "Your executor has no hookmetamethod/getnamecallmethod, so it cannot record remote calls."
+	end
+	local okH, errH = pcall(function()
+		local old
+		local function hook(self, ...)
+			local method = getnamecallmethod()
+			if spy.on and not spy.ignore and (method == "FireServer" or method == "InvokeServer") then
+				local okC, cn = pcall(function() return self.ClassName end)
+				if okC and (cn == "RemoteEvent" or cn == "RemoteFunction" or cn == "UnreliableRemoteEvent") then
+					local n = select("#", ...)
+					local args = {...}
+					task.defer(function()
+						local okE, entry = pcall(function()
+							return {remote = instPath(self), class = cn, method = method, args = argsToJson(args, n), t = os.clock()}
+						end)
+						if okE then
+							local last = spy.log[#spy.log]
+							if last and last.remote == entry.remote and last.args == entry.args and entry.t - last.t < 0.4 then
+								last.count = (last.count or 1) + 1
+								last.t = entry.t
+							else
+								entry.count = 1
+								table.insert(spy.log, entry)
+								if #spy.log > 300 then table.remove(spy.log, 1) end
+							end
+							if spy.onLog then pcall(spy.onLog) end
+						end
+					end)
+				end
+			end
+			if setnamecallmethod then pcall(setnamecallmethod, method) end
+			return old(self, ...)
+		end
+		old = hookmetamethod(game, "__namecall", newcclosure and newcclosure(hook) or hook)
+	end)
+	if not okH then return false, "Hook failed: " .. tostring(errH) end
+	spy.hooked = true
+	return true
+end
+function spy.fmt(e)
+	local s = e.method .. "  " .. e.remote .. "  " .. e.args
+	if (e.count or 1) > 1 then s = s .. "   x" .. e.count end
+	return s
+end
+function spy.text(limit)
+	local lines = {}
+	local from = math.max(1, #spy.log - (limit or 60) + 1)
+	for i = from, #spy.log do lines[#lines + 1] = spy.fmt(spy.log[i]) end
+	return table.concat(lines, "\n")
+end
+
+local function callRemote(remote, method, args, n)
+	spy.ignore = true
+	local res = table.pack(pcall(function()
+		if method == "invoke" then
+			return remote:InvokeServer(table.unpack(args, 1, n))
+		end
+		remote:FireServer(table.unpack(args, 1, n))
+		return nil
+	end))
+	spy.ignore = false
+	return res
+end
+
+local function isRemote(o)
+	return o:IsA("RemoteEvent") or o:IsA("RemoteFunction") or o:IsA("UnreliableRemoteEvent")
+end
+local function scanRemotes(root, limit)
+	local out = {}
+	root = root or ReplicatedStorage
+	local okD, desc = pcall(root.GetDescendants, root)
+	if not okD then return out end
+	for _, d in ipairs(desc) do
+		if isRemote(d) then
+			table.insert(out, {path = instPath(d), class = d.ClassName})
+			if #out >= (limit or 200) then break end
+		end
+	end
+	table.sort(out, function(a, b) return a.path < b.path end)
+	return out
+end
+
+-- Studio Lite's own model loader: Clear then Load (both RemoteFunctions). Inserts on the SERVER.
+local function serverInsertAsset(id)
+	local folder = ReplicatedStorage:FindFirstChild("StudioLiteFolder")
+	local clear = folder and folder:FindFirstChild("ClearAssetModelToPlayerGuiServerFunction")
+	local load = folder and folder:FindFirstChild("LoadAssetModelToPlayerGuiServerFunction")
+	if not (clear and load) then return false, "Studio Lite remotes not found in ReplicatedStorage.StudioLiteFolder" end
+	local lp = Players.LocalPlayer
+	local function snapshot()
+		local s = {}
+		local function add(root, label_)
+			if root then
+				for _, c in ipairs(root:GetChildren()) do s[c] = label_ end
+			end
+		end
+		add(Workspace, "Workspace")
+		add(lp and lp:FindFirstChildOfClass("PlayerGui"), "PlayerGui")
+		return s
+	end
+	local before = snapshot()
+	local sid = tostring(id)
+	spy.ignore = true
+	local okC = pcall(function() return clear:InvokeServer(sid) end)
+	local okL, resL = pcall(function() return load:InvokeServer(sid) end)
+	spy.ignore = false
+	if not okL then return false, tostring(resL) end
+	task.wait(1.2)
+	local found = {}
+	local function scan(root, label_)
+		if not root then return end
+		for _, c in ipairs(root:GetChildren()) do
+			if not before[c] and not c:IsDescendantOf(gui) then table.insert(found, {name = c.Name, where = label_}) end
+		end
+	end
+	scan(Workspace, "Workspace")
+	scan(lp and lp:FindFirstChildOfClass("PlayerGui"), "PlayerGui")
+	return true, found, resL, okC
+end
+
+local aiPrefill, gotoTab
 -- ===== Favorites / collections =====
 local activeCol = "Default"
 local function isFav(id, col)
@@ -621,6 +837,22 @@ bInsert.MouseButton1Click:Connect(function()
 	local item = curItem
 	local id, typeId = tonumber(item.id), tonumber(item.typeId)
 	if not id then showToast("Invalid asset ID") return end
+	-- Real SERVER-side insert through Studio Lite's own remotes (Clear, then Load)
+	if typeId ~= 38 then
+		showToast("Inserting on server...")
+		local okS, found = serverInsertAsset(id)
+		if okS then
+			detail.Visible = false
+			if #found > 0 then
+				showToast("Inserted on server: " .. tostring(found[1].name):sub(1, 22) .. " (" .. found[1].where .. ")")
+			else
+				showToast("Server accepted the insert. Check Studio Lite's Dex / Workspace.")
+			end
+			return
+		end
+		showToast("Server insert failed (" .. tostring(found):sub(1, 50) .. "). Inserting locally only.")
+		task.wait(1.8)
+	end
 	local lp = Players.LocalPlayer
 	local hrp = lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
 	local target = hrp and (hrp.Position + hrp.CFrame.LookVector * 14) or Vector3.new(0, 10, 0)
@@ -706,7 +938,7 @@ bInsert.MouseButton1Click:Connect(function()
 	end)
 	if ok then
 		detail.Visible = false
-		showToast("Inserted into Workspace" .. (placed and (": " .. tostring(placed.Name):sub(1, 24)) or "") .. (hrp and " (in front of you)" or ""))
+		showToast("Inserted LOCALLY (only you can see it)" .. (placed and (": " .. tostring(placed.Name):sub(1, 24)) or "") .. (hrp and " (in front of you)" or ""))
 	else
 		showToast("Insert failed: " .. tostring(msg):sub(1, 90))
 	end
@@ -1779,7 +2011,7 @@ def("get_properties", "Read properties of an instance. Without 'names' returns t
 	return res
 end)
 
-def("set_property", "Set one property. Value is always a string: numbers '5', booleans 'true', Vector3 '1, 2, 3', Color3 '255, 0, 0' or '#FF0000', UDim2 'xScale, xOffset, yScale, yOffset', CFrame '3 or 6 or 12 numbers', enums by name ('Neon'), instances by path. Use property 'Parent' (value = new parent path) to move, '@AttrName' for attributes, 'Source' for script code (prefer create_script/edit_script).", {
+def("set_property", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Set one property. Value is always a string: numbers '5', booleans 'true', Vector3 '1, 2, 3', Color3 '255, 0, 0' or '#FF0000', UDim2 'xScale, xOffset, yScale, yOffset', CFrame '3 or 6 or 12 numbers', enums by name ('Neon'), instances by path. Use property 'Parent' (value = new parent path) to move, '@AttrName' for attributes, 'Source' for script code (prefer create_script/edit_script).", {
 	path = P("STRING", "Instance path"),
 	property = P("STRING", "Property name"),
 	value = P("STRING", "New value as string"),
@@ -1799,7 +2031,7 @@ def("set_property", "Set one property. Value is always a string: numbers '5', bo
 	return okr({path = pathOf(inst), property = a.property, now = nowv})
 end)
 
-def("create_instance", "Create ANY instance (Part, Model, Folder, Sound, PointLight, ScreenGui, TextLabel, RemoteEvent, Humanoid, ...). For scripts prefer create_script. BaseParts default to Anchored and are placed in front of the player unless Position is given.", {
+def("create_instance", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Create ANY instance (Part, Model, Folder, Sound, PointLight, ScreenGui, TextLabel, RemoteEvent, Humanoid, ...). For scripts prefer create_script. BaseParts default to Anchored and are placed in front of the player unless Position is given.", {
 	class_name = P("STRING", "ClassName, e.g. 'Part'"),
 	parent = P("STRING", "Parent path (default 'project' = Workspace/RGC_Project)"),
 	name = P("STRING", "Instance name"),
@@ -1836,12 +2068,12 @@ def("create_instance", "Create ANY instance (Part, Model, Folder, Sound, PointLi
 	end
 	obj.Parent = parent
 	logUndo({kind = "created", inst = obj})
-	local res = okr({path = pathOf(obj), class = obj.ClassName})
+	local res = okr({path = pathOf(obj), class = obj.ClassName, scope = "CLIENT-ONLY (server and other players cannot see it)"})
 	if #errs > 0 then res.property_errors = errs end
 	return res
 end)
 
-def("create_script", "Create (or overwrite/append to) a Script, LocalScript or ModuleScript with source code. Keep each call under ~200 lines: for bigger scripts call once with mode='replace' and then again with mode='append' for each next part. Always verify with read_script for big scripts.", {
+def("create_script", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Create (or overwrite/append to) a Script, LocalScript or ModuleScript with source code. Keep each call under ~200 lines: for bigger scripts call once with mode='replace' and then again with mode='append' for each next part. Always verify with read_script for big scripts.", {
 	parent = P("STRING", "Parent path, e.g. 'ServerScriptService', 'StarterGui', 'StarterPlayer/StarterPlayerScripts', 'Workspace/RGC_Project'"),
 	name = P("STRING", "Script name"),
 	script_type = P("STRING", "Script, LocalScript or ModuleScript", {enum = {"Script", "LocalScript", "ModuleScript"}}),
@@ -1877,7 +2109,7 @@ def("create_script", "Create (or overwrite/append to) a Script, LocalScript or M
 	local okW, how = pcall(writeSource, inst, final)
 	if not okW then return fail("Write failed: " .. tostring(how)) end
 	local back = readSource(inst)
-	return okr({path = pathOf(inst), class = inst.ClassName, created = created, storage = how, lines = lineCount(final), chars = #final, verified = (back == final)})
+	return okr({path = pathOf(inst), class = inst.ClassName, scope = "CLIENT-ONLY (not a real server script)", created = created, storage = how, lines = lineCount(final), chars = #final, verified = (back == final)})
 end)
 
 def("read_script", "Read a script's source with line numbers. Returns up to ~12000 chars per call; use start_line/end_line to page (next_start_line is given when truncated). Only scripts created by the agent (or readable in this runtime) can be read.", {
@@ -1908,7 +2140,7 @@ def("read_script", "Read a script's source with line numbers. Returns up to ~120
 	return res
 end)
 
-def("edit_script", "Replace an exact piece of text inside a script (find must match exactly, including whitespace). Fails if 'find' is missing or not unique unless replace_all=true. Preferred way to modify existing code.", {
+def("edit_script", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Replace an exact piece of text inside a script (find must match exactly, including whitespace). Fails if 'find' is missing or not unique unless replace_all=true. Preferred way to modify existing code.", {
 	path = P("STRING", "Script path"),
 	find = P("STRING", "Exact text to find"),
 	replace = P("STRING", "Replacement text"),
@@ -1945,7 +2177,7 @@ def("edit_script", "Replace an exact piece of text inside a script (find must ma
 	return okr({path = pathOf(inst), replaced = a.replace_all and count or 1, lines = lineCount(final), storage = how})
 end)
 
-def("edit_script_lines", "Replace lines start_line..end_line (inclusive, 1-based) of a script with new_text. Use new_text='' to delete lines. To insert before line N use start_line=N, end_line=N-1.", {
+def("edit_script_lines", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Replace lines start_line..end_line (inclusive, 1-based) of a script with new_text. Use new_text='' to delete lines. To insert before line N use start_line=N, end_line=N-1.", {
 	path = P("STRING", "Script path"),
 	start_line = P("INTEGER", "First line to replace"),
 	end_line = P("INTEGER", "Last line to replace"),
@@ -1971,7 +2203,7 @@ def("edit_script_lines", "Replace lines start_line..end_line (inclusive, 1-based
 	return okr({path = pathOf(inst), lines = lineCount(final), storage = how})
 end)
 
-def("delete_instance", "Destroy an instance (and its descendants). Services and the RGC UI are protected.", {
+def("delete_instance", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Destroy an instance (and its descendants). Services and the RGC UI are protected.", {
 	path = P("STRING", "Instance path"),
 }, {"path"}, function(a)
 	local inst, err = resolve(a.path)
@@ -1989,7 +2221,7 @@ def("delete_instance", "Destroy an instance (and its descendants). Services and 
 	return okr({deleted = p, instances_removed = n, undo_available = okC and clone ~= nil})
 end)
 
-def("move_instance", "Move an instance to a new parent (and optionally rename it).", {
+def("move_instance", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Move an instance to a new parent (and optionally rename it).", {
 	path = P("STRING", "Instance path"),
 	new_parent = P("STRING", "New parent path"),
 	new_name = P("STRING", "Optional new name"),
@@ -2013,7 +2245,7 @@ def("move_instance", "Move an instance to a new parent (and optionally rename it
 	return okr({path = pathOf(inst)})
 end)
 
-def("clone_instance", "Clone an instance (scripts keep their stored code).", {
+def("clone_instance", "[CLIENT-ONLY: exists only on this device, the server/other players can't see it and it vanishes on rejoin] Clone an instance (scripts keep their stored code).", {
 	path = P("STRING", "Instance path"),
 	new_parent = P("STRING", "Parent for the clone (default: same parent)"),
 	new_name = P("STRING", "Name for the clone"),
@@ -2185,47 +2417,139 @@ def("search_assets", "Search the Roblox Creator Store for models, audio, images,
 	return okr({count = #out, results = out})
 end)
 
-def("insert_asset", "Insert a Creator Store model by asset id into the game (placed in front of the player unless position given). Reports contained scripts.", {
+def("insert_asset", "Insert a Creator Store asset by id on the SERVER using Studio Lite's own loader remotes (real, visible to everyone). Falls back to a client-only insert if the remotes fail. Use search_assets first to find ids.", {
 	asset_id = P("INTEGER", "Asset id"),
-	parent = P("STRING", "Parent path (default project)"),
-	position = P("STRING", "Optional world position 'x, y, z'"),
 }, {"asset_id"}, function(a)
 	local id = tonumber(a.asset_id)
 	if not id then return fail("asset_id must be a number") end
-	local parent, err = resolve(a.parent or "project")
-	if not parent then return fail(err) end
-	local objects
-	local okGet, got = pcall(function() return game:GetObjects("rbxassetid://" .. id) end)
-	if okGet and type(got) == "table" and #got > 0 then objects = got end
-	if not objects then
-		local okL, loaded = pcall(function() return InsertService:LoadAsset(id) end)
-		if okL and loaded then
-			objects = loaded:GetChildren()
+	if not setting("fullAccess", true) then return fail("Needs 'Allow all access' ON") end
+	local okS, found, ret = serverInsertAsset(id)
+	if okS then
+		changeCount += 1
+		local items = {}
+		for _, f in ipairs(found) do items[#items + 1] = f.where .. "/" .. f.name end
+		return okr({server_side = true, inserted = items, note = #items == 0 and "Remote accepted the request but no new object was detected yet; check get_tree on Workspace in a moment." or "Inserted through Studio Lite's server remotes.", returned = ret ~= nil and tostring(ret):sub(1, 100) or nil})
+	end
+	return fail("Server insert failed: " .. tostring(found))
+end)
+
+def("list_remotes", "List RemoteEvents/RemoteFunctions under an instance (default ReplicatedStorage). Studio Lite's own remotes are under ReplicatedStorage/StudioLiteFolder.", {
+	root = P("STRING", "Where to look (default ReplicatedStorage)"),
+	limit = P("INTEGER", "Max results (default 120)"),
+}, nil, function(a)
+	local root, err = resolve(a.root or "ReplicatedStorage")
+	if not root then return fail(err) end
+	local list = scanRemotes(root, clamp(tonumber(a.limit) or 120, 1, 300))
+	local out = {}
+	for _, r in ipairs(list) do out[#out + 1] = r.path .. " [" .. r.class .. "]" end
+	return okr({count = #out, remotes = out})
+end)
+
+def("get_spy_log", "Read the remote calls the USER recorded with the Bridge tab 'Spy' while using Studio Lite's own buttons (create part, new script, set property...). This shows the exact remote names and argument formats, so you can replay/adapt them with call_remote. If empty, ask the user to turn Spy ON in the Bridge tab, do the action in Studio Lite, then tell you.", {
+	limit = P("INTEGER", "Number of recent calls (default 30)"),
+}, nil, function(a)
+	local n = clamp(tonumber(a.limit) or 30, 1, 100)
+	return okr({spy_installed = spy.hooked, spy_on = spy.on, total = #spy.log, calls = spy.text(n)})
+end)
+
+def("call_remote", "Call a RemoteEvent (fire) or RemoteFunction (invoke): the way to make REAL server-side changes. args_json is a JSON array of arguments. Special strings: 'inst:Workspace/Part' (instance), 'v3:1,2,3', 'v2:1,2', 'c3:255,0,0' (Color3), 'cf:x,y,z' or 12 numbers (CFrame), 'nil:' (nil). Learn the exact format from get_spy_log before guessing; never guess destructive calls.", {
+	path = P("STRING", "Remote path, e.g. ReplicatedStorage/StudioLiteFolder/SomeRemote"),
+	method = P("STRING", "fire or invoke (default: by remote class)", {enum = {"fire", "invoke"}}),
+	args_json = P("STRING", "JSON array of arguments, e.g. [\"abc\", 5, \"v3:0,5,0\"]"),
+}, {"path"}, function(a)
+	if not setting("fullAccess", true) then return fail("Needs 'Allow all access' ON") end
+	local r, err = resolve(a.path)
+	if not r then return fail(err) end
+	if not (r:IsA("RemoteEvent") or r:IsA("RemoteFunction") or r:IsA("UnreliableRemoteEvent")) then return fail(pathOf(r) .. " is not a remote (" .. r.ClassName .. ")") end
+	local args, n = {}, 0
+	if a.args_json and trim(a.args_json) ~= "" then
+		local okJ, decoded = pcall(HttpService.JSONDecode, HttpService, a.args_json)
+		if not okJ or type(decoded) ~= "table" or (decoded[1] == nil and next(decoded) ~= nil) then return fail("args_json must be a JSON array like [\"a\", 1]") end
+		n = #decoded
+		for i = 1, n do args[i] = fromTagged(decoded[i]) end
+	end
+	local method = a.method or (r:IsA("RemoteFunction") and "invoke" or "fire")
+	if method == "invoke" and not r:IsA("RemoteFunction") then return fail("This is a RemoteEvent: use method 'fire'") end
+	if method == "fire" and r:IsA("RemoteFunction") then return fail("This is a RemoteFunction: use method 'invoke'") end
+	local res = callRemote(r, method, args, n)
+	if not res[1] then return fail("Remote error: " .. tostring(res[2])) end
+	local out = {}
+	for i = 2, res.n do out[#out + 1] = toTagged(res[i], 0) end
+	changeCount += 1
+	return okr({called = pathOf(r), method = method, returned = out, note = "Server calls cannot be undone from the Undo button."})
+end)
+
+def("describe_map", "Summarize the map in Workspace (or a sub-tree): part counts, size/bounds, biggest models, lighting, spawns, sounds, lights, scripts, how dense it is. Use it before giving advice about what to add or improve.", {
+	root = P("STRING", "Where (default Workspace)"),
+}, nil, function(a)
+	local root, err = resolve(a.root or "Workspace")
+	if not root then return fail(err) end
+	local counts, parts, scanned = {}, 0, 0
+	local minV, maxV
+	local okD, desc = pcall(root.GetDescendants, root)
+	if not okD then return fail("Cannot scan") end
+	local spawns, lights, sounds, scriptsN, trunc = 0, 0, 0, 0, false
+	for _, d in ipairs(desc) do
+		scanned += 1
+		if scanned > 60000 then trunc = true break end
+		if scanned % 4000 == 0 then task.wait() end
+		if not isHidden(d) and not d:IsDescendantOf(gui) then
+			counts[d.ClassName] = (counts[d.ClassName] or 0) + 1
+			if d:IsA("BasePart") then
+				parts += 1
+				local p, s = d.Position, d.Size
+				local lo, hi = p - s / 2, p + s / 2
+				minV = minV and Vector3.new(math.min(minV.X, lo.X), math.min(minV.Y, lo.Y), math.min(minV.Z, lo.Z)) or lo
+				maxV = maxV and Vector3.new(math.max(maxV.X, hi.X), math.max(maxV.Y, hi.Y), math.max(maxV.Z, hi.Z)) or hi
+			end
+			if d:IsA("SpawnLocation") then spawns += 1 end
+			if d:IsA("Light") then lights += 1 end
+			if d:IsA("Sound") then sounds += 1 end
+			if d:IsA("LuaSourceContainer") then scriptsN += 1 end
 		end
 	end
-	if not objects or #objects == 0 then return fail("Could not load this asset (blocked by the runtime, private, or not a model)") end
-	local target
-	if a.position then
-		local n = nums(a.position)
-		if #n >= 3 then target = Vector3.new(n[1], n[2], n[3]) end
+	local top = {}
+	for k, v in pairs(counts) do top[#top + 1] = {k, v} end
+	table.sort(top, function(x, y) return x[2] > y[2] end)
+	local classes = {}
+	for i = 1, math.min(14, #top) do classes[#classes + 1] = top[i][1] .. " x" .. top[i][2] end
+	local res = okr({root = pathOf(root), parts = parts, classes = classes, spawns = spawns, lights = lights, sounds = sounds, scripts_visible = scriptsN, truncated = trunc})
+	if minV and maxV then
+		local size = maxV - minV
+		res.bounds_min = ser(minV)
+		res.bounds_max = ser(maxV)
+		res.size = ser(size)
+		local area = math.max(1, size.X * size.Z)
+		res.parts_per_1000_sq_studs = math.floor(parts / area * 1000 * 100) / 100
 	end
-	if not target then
-		local hrp = lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
-		target = hrp and (hrp.Position + hrp.CFrame.LookVector * 14) or Vector3.new(0, 5, 0)
-	end
-	local names, count, scripts = {}, 0, {}
-	for _, obj in ipairs(objects) do
-		obj.Parent = parent
-		if obj:IsA("Model") then pcall(obj.PivotTo, obj, CFrame.new(target)) elseif obj:IsA("BasePart") then obj.Position = target end
-		logUndo({kind = "created", inst = obj})
-		table.insert(names, obj.Name .. " [" .. obj.ClassName .. "]")
-		count += 1
-		for _, d in ipairs(obj:GetDescendants()) do
-			count += 1
-			if d:IsA("LuaSourceContainer") and #scripts < 10 then table.insert(scripts, pathOf(d)) end
+	local models = {}
+	local okK, kids = pcall(root.GetChildren, root)
+	if okK then
+		for _, k in ipairs(kids) do
+			if not isHidden(k) and (k:IsA("Model") or k:IsA("Folder")) then
+				local n, sz = 0, ""
+				pcall(function() n = #k:GetDescendants() end)
+				if k:IsA("Model") then pcall(function() sz = " size " .. ser(k:GetExtentsSize()) end) end
+				models[#models + 1] = {k.Name .. " [" .. k.ClassName .. "] " .. n .. " items" .. sz, n}
+			end
 		end
 	end
-	return okr({inserted = names, parent = pathOf(parent), instances = count, scripts_inside = scripts})
+	table.sort(models, function(x, y) return x[2] > y[2] end)
+	local ml = {}
+	for i = 1, math.min(25, #models) do ml[#ml + 1] = models[i][1] end
+	res.top_level = ml
+	local L = game:GetService("Lighting")
+	local lt = {}
+	for _, n in ipairs({"ClockTime", "Brightness", "Ambient", "OutdoorAmbient", "FogEnd", "FogColor", "GlobalShadows"}) do
+		local okL, v = pcall(function() return L[n] end)
+		if okL then lt[n] = ser(v) end
+	end
+	res.lighting = lt
+	res.has_sky = L:FindFirstChildOfClass("Sky") ~= nil
+	res.has_atmosphere = L:FindFirstChildOfClass("Atmosphere") ~= nil
+	local hrp = lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+	if hrp then res.player_position = ser(hrp.Position) end
+	return res
 end)
 
 def("save_notes", "Save a short plan / progress note (max ~3000 chars). It is shown to you at the start of every step, so use it to keep track of long multi-step tasks. Replaces the previous note.", {
@@ -2234,6 +2558,8 @@ def("save_notes", "Save a short plan / progress note (max ~3000 chars). It is sh
 	notes = tostring(a.text or ""):sub(1, 3000)
 	return okr({saved = #notes})
 end)
+
+resolveForTag = resolve
 
 local function toolDecls()
 	local d = {}
@@ -2275,29 +2601,34 @@ local function undoLast()
 end
 
 -- ---------- system prompt ----------
-local SYSTEM_PROMPT = [==[You are RGC Agent, an autonomous Roblox building and scripting assistant that lives inside the Studio Lite mobile game (RGC Glass Creator Studio). You act on the live game through TOOLS. You never just describe what you would do: you do it.
+local SYSTEM_PROMPT = [==[You are RGC Agent, an autonomous Roblox building, scripting and map-design assistant inside the Studio Lite game (RGC Glass Creator Studio). You act through TOOLS and you never just describe what you would do.
+
+THE MOST IMPORTANT FACT: CLIENT vs SERVER
+- You run on the player's device (client, via an executor). Anything created by create_instance, create_script, set_property, clone/move/delete is CLIENT-ONLY: the server and other players cannot see it, server scripts cannot find it, and it disappears when the player rejoins. It is only good for a quick local preview or for testing.
+- Real, working changes must reach the SERVER. There are three ways, in this order of preference:
+  1. A server bridge: insert_asset already inserts models on the server through Studio Lite's own remotes. For other actions use call_remote, but ONLY with a format you have seen: read get_spy_log (the user records Studio Lite's own remote calls in the Bridge tab) or list_remotes. Never guess unknown remote arguments and never call remotes you do not understand.
+  2. Write the complete script in your reply, in a ```lua code block (one block per script). Say exactly where it goes (for example: Script in ServerScriptService, LocalScript in StarterPlayerScripts, ModuleScript in ReplicatedStorage). The user copies it with the Copy button and pastes it into Studio Lite's script editor, where it runs on the server for real. Prefer self-contained BUILDER scripts that create the parts, UI, lighting, sounds and logic by code, so one paste builds everything.
+  3. If the user only wants a quick look, you may make a client-only preview, and you must say it is local only.
+- NEVER say that something exists for the server, or that a script is installed, unless a tool result confirmed server_side=true or a successful call_remote. Be honest about what is client-only.
+- Reading works: you can inspect Workspace, ReplicatedStorage, StarterGui, Lighting and everything the client can replicate. ServerScriptService and ServerStorage contents are not visible to the client.
 
 HOW YOU WORK
-- Work like an engineer: explore first (get_tree, list_children, find_instances, read_script), then act, then verify (read back, run_script, get_output).
-- NEVER claim you created, changed or deleted something unless a tool result in this conversation confirmed it (ok=true). If a tool returns an error, read it, fix the cause and retry. Never invent paths: look them up.
-- Every tool call needs VALID JSON arguments. You may chain as many tool calls as you need. Keep going until the whole task is finished, then give a short final summary: what you made, where it is, how to use it.
-- Default place for new things is the folder Workspace/RGC_Project ("project"). Use other places when the user asks or when it is the proper home: ServerScriptService (server scripts), ReplicatedStorage (modules, remotes, shared), StarterGui (UI), StarterPlayer/StarterPlayerScripts (client scripts), StarterPack (tools), Lighting, SoundService.
-- Paths look like Workspace/RGC_Project/Door or ServerScriptService/GameLogic. The first segment is a service. 'game' lists all services.
+- Explore first (describe_map, get_tree, list_children, find_instances, read_script), then act, then verify. If a tool returns an error, read it and fix the cause. Never invent paths.
+- You may chain as many tool calls as you need. Every tool call needs VALID JSON arguments. Keep going until the task is done, then give a short summary: what you did, what is local vs real, and what the user must paste or do.
+- Paths look like Workspace/Folder/Part or ReplicatedStorage/Remotes. The first segment is a service. 'game' lists all services.
+- You can find Creator Store assets with search_assets and put them in the map with insert_asset (server side).
 
-ENVIRONMENT FACTS
-- You run client-side inside Studio Lite. Everything you create exists in this running game session. Scripts you create keep their code (read_script returns it) and can be executed locally with run_script. A Script in ServerScriptService is stored there and can be test-run locally, but it is not a true server script: tell the user briefly when that matters.
-- Use Script for server logic, LocalScript for client logic, ModuleScript for shared modules.
-- Build parts Anchored unless physics are wanted, with sensible Size, Position, Color, Material. Group with Models or Folders and give clear names. Use get_player to place things near the player when no position is given.
-- You can insert Creator Store models: search_assets then insert_asset.
+MAP ADVISOR
+- When the user asks what to add or improve, or asks if their map looks good: call describe_map (and get_tree on interesting parts), look at size, density, lighting, sky/atmosphere, sounds, spawns, then give concrete, specific recommendations grouped as: Look and feel (lighting, atmosphere, colors, props, decals), Gameplay (objectives, checkpoints, hazards, collectibles, NPCs, shops), Sound (ambience, music, effects), Performance. Be honest if it looks empty or messy. Offer to build the best ideas: with search_assets plus insert_asset for ready-made models, or with a builder script they can paste.
 
 WRITING LARGE CODE
-- One tool call must stay under about 200 lines of code. For bigger scripts: create_script with the first part (mode replace), then create_script again with mode append for every next part, then read_script to verify. Prefer edit_script / edit_script_lines to change existing code instead of rewriting everything. Split big systems into several ModuleScripts.
-- Write complete, working, modern Luau (task.wait, no wait()). Never leave placeholders like "-- rest of code here".
+- Write complete, working, modern Luau (task.wait, no wait()). No placeholders like "-- rest of code". For very big systems split into several scripts/modules, each in its own code block.
+- If you use create_script for a local preview, keep each call under ~200 lines and use mode=append for the next parts.
 
 STYLE
 - Be concise. Reply in the language the user writes (they may use Tagalog or Taglish).
-- If the request is ambiguous, make a sensible decision and proceed; ask only when truly blocked.
-- For long tasks keep a short plan with save_notes (it is shown to you at the start of every step).]==]
+- If a request is ambiguous, decide sensibly and proceed; ask only when truly blocked.
+- For long tasks keep a short plan with save_notes (shown to you at the start of every step).]==]
 
 local function systemText()
 	local s = SYSTEM_PROMPT .. "\n\nPROJECT FOLDER: " .. pathOf(projectRoot)
@@ -2893,27 +3224,128 @@ clearBtn.MouseButton1Click:Connect(function()
 end)
 
 for i, c in ipairs({
-	{"🔍 Scan the game", "Scan the whole game: list Workspace, ReplicatedStorage, ServerScriptService, StarterGui and StarterPlayer, then summarize what exists."},
-	{"🧱 Build something", "Build a small obby with 10 platforms, a checkpoint spawn and a kill brick in the RGC_Project folder."},
-	{"📜 Write a script", "Create a ModuleScript and a Script in ServerScriptService that give players a Coins leaderstat and a coin pickup system."},
-	{"🐞 Debug", "Check the output for errors, find the cause in my scripts and fix it."},
-	{"🛍 Get models", "Search the Creator Store for a medieval house model and insert the best match near me."},
+	{"🗺 Review my map", "Look at my current map (describe_map and get_tree), tell me honestly how it looks, and recommend what to add or improve."},
+	{"🧱 Builder script", "Write me a builder script that creates a small obby with 10 platforms, a checkpoint and a kill brick. I'll paste it into Studio Lite."},
+	{"📜 Write a script", "Write a Script and a ModuleScript that give players a Coins leaderstat and a coin pickup system."},
+	{"🛍 Add models", "Search the Creator Store for a medieval house and insert the best match on the server."},
+	{"🔗 Learn the game", "List the remotes in ReplicatedStorage/StudioLiteFolder and tell me what each one probably does."},
 }) do
 	local chip = btn(chips, c[1], UDim2.fromOffset(#c[1] * 6 + 28, 24), nil, C.card, 11)
 	chip.LayoutOrder = i
 	chip.MouseButton1Click:Connect(function() inputBox.Text = c[2] inputBox:CaptureFocus() end)
 end
 
-addMessage("model", "Hi! I'm the RGC Agent. I use real tools: I can browse Workspace, ReplicatedStorage, ServerScriptService and more, create folders, parts and scripts, read and edit code, insert Creator Store models, run code and read the output. Add your OpenRouter key in ⚙ Settings, then tell me what to build.")
+aiPrefill = function(text)
+	inputBox.Text = text
+end
+addMessage("model", "Hi! I'm the RGC Agent. I can explore your map, review it and recommend what to add, search and insert Creator Store models on the server, and write complete scripts for you to paste into Studio Lite (real server scripts). Things I create directly are client-only previews, and I'll always tell you which is which. Add your OpenRouter key in ⚙ Settings to start.")
 
 end -- buildAIPage
 buildAIPage()
+
+-- ===== BRIDGE PAGE (remote scanner + spy) =====
+local function buildBridgePage()
+	local pB = newPage("Bridge")
+	local info = label(pB, "Make REAL (server) changes: turn Spy ON, then use Studio Lite's own buttons (insert part, new script, set property...). The calls it sends are recorded here. Send them to the AI so it can repeat them.", UDim2.new(1, -16, 0, 44), UDim2.fromOffset(8, 0), C.sub, 11)
+	local row = new("Frame", {Size = UDim2.new(1, -16, 0, 30), Position = UDim2.fromOffset(8, 48), BackgroundTransparency = 1}, pB)
+	local function rb(i, text, color)
+		return btn(row, text, UDim2.new(0.2, -4, 1, 0), UDim2.new((i - 1) * 0.2, 0, 0, 0), color or C.card, 11)
+	end
+	local spyBtn = rb(1, "Spy: OFF")
+	local scanBtn = rb(2, "Scan remotes")
+	local copyBtn = rb(3, "Copy")
+	local sendBtn2 = rb(4, "Send to AI", C.accent)
+	local clearBtn2 = rb(5, "Clear")
+	local list = vscroll(pB, UDim2.new(1, -16, 1, -86), UDim2.fromOffset(8, 82))
+	new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, list)
+	local mode, order = "log", 0
+	local scanLines = {}
+
+	local function addRow(text, color, copyText)
+		order += 1
+		local r = round(new("TextButton", {
+			Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.bar, BackgroundTransparency = 0.4,
+			Text = #text > 700 and (text:sub(1, 700) .. "...") or text, TextColor3 = color or C.text, Font = Enum.Font.Code, TextSize = 10,
+			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true,
+			AutoButtonColor = false, LayoutOrder = order, BorderSizePixel = 0,
+		}, list), 8)
+		new("UIPadding", {PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4), PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)}, r)
+		r.MouseButton1Click:Connect(function() copyOut(copyText or text, "line") end)
+	end
+	local function render()
+		clearGui(list)
+		order = 0
+		if mode == "scan" then
+			if #scanLines == 0 then addRow("No remotes found.", C.sub) end
+			for _, l in ipairs(scanLines) do addRow(l, l:find("StudioLiteFolder") and C.good or C.text) end
+			return
+		end
+		if #spy.log == 0 then
+			addRow(spy.on and "Spy is ON. Now do something in Studio Lite (insert a part, create a script...). Calls will appear here." or "Nothing recorded yet. Turn Spy ON first.", C.sub)
+			return
+		end
+		local from = math.max(1, #spy.log - 80 + 1)
+		for i = from, #spy.log do addRow(spy.fmt(spy.log[i]), C.text) end
+		task.defer(function() list.CanvasPosition = Vector2.new(0, 1e7) end)
+	end
+	spy.onLog = function() if mode == "log" then render() end end
+
+	spyBtn.MouseButton1Click:Connect(function()
+		if not spy.on then
+			local ok, err = spy.install()
+			if not ok then showToast(tostring(err):sub(1, 80)) return end
+			spy.on = true
+			mode = "log"
+		else
+			spy.on = false
+		end
+		spyBtn.Text = spy.on and "Spy: ON" or "Spy: OFF"
+		spyBtn.BackgroundColor3 = spy.on and C.good or C.card
+		render()
+	end)
+	scanBtn.MouseButton1Click:Connect(function()
+		mode = "scan"
+		scanLines = {}
+		local found = scanRemotes(ReplicatedStorage, 250)
+		for _, r in ipairs(found) do scanLines[#scanLines + 1] = r.path .. "  [" .. r.class .. "]" end
+		render()
+		showToast(#found .. " remote(s) found")
+	end)
+	copyBtn.MouseButton1Click:Connect(function()
+		if mode == "scan" then
+			copyOut(table.concat(scanLines, "\n"), "remote list")
+		else
+			copyOut(spy.text(100), "recorded calls")
+		end
+	end)
+	sendBtn2.MouseButton1Click:Connect(function()
+		local text
+		if mode == "scan" then
+			text = "These are the remotes in this game. Tell me what each probably does and which ones can create parts/scripts/instances on the server:\n" .. table.concat(scanLines, "\n")
+		else
+			if #spy.log == 0 then showToast("Nothing recorded yet") return end
+			text = "I recorded these remote calls while using Studio Lite's own buttons (I did: <describe what you did>). Learn the format, then repeat/adapt it with call_remote, or tell me what you need:\n" .. spy.text(25)
+		end
+		if #text > 7000 then text = text:sub(1, 7000) .. "\n...(cut)" end
+		if aiPrefill then aiPrefill(text) end
+		if gotoTab then gotoTab("AI") end
+		showToast("Added to the AI input. Edit it and press Send")
+	end)
+	clearBtn2.MouseButton1Click:Connect(function()
+		spy.log = {}
+		scanLines = {}
+		render()
+	end)
+	render()
+end
+buildBridgePage()
 
 -- ===== Tabs =====
 local TABS = {
 	{"Store", "🛍 Store"},
 	{"Saved", "★ Saved"},
 	{"AI", "✦ AI Agent"},
+	{"Bridge", "🔗 Bridge"},
 	{"Snippets", "{ } Snippets"},
 }
 local tabBtns = {}
@@ -2926,6 +3358,7 @@ local function showTab(name)
 	end
 	if name == "Saved" then refreshSaved() end
 end
+gotoTab = showTab
 for i, t in ipairs(TABS) do
 	local b = btn(tabBar, t[2], UDim2.fromOffset(#t[2] * 7 + 34, 28), nil, C.card, 12)
 	b.LayoutOrder = i
