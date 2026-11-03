@@ -1,4 +1,4 @@
-print("[RGC Glass Creator Studio] v2 loaded - AI Agent with tool calling")
+print("[RGC Glass Creator Studio] v2.1 loaded - OpenRouter agent, Sound FX / Music split")
 -- RGC Glass Creator Studio v2 | DevNameGelo · RGC
 -- AI Agent with real tool calling (Gemini function calling), glass UI, Creator Store browser
 local Players = game:GetService("Players")
@@ -26,16 +26,16 @@ if oldSnd then oldSnd:Destroy() end
 local CATS = {
 	{name = "Models",     id = 10,  icon = "📦"},
 	{name = "Images",     id = 13,  icon = "🖼"},
-	{name = "Audio",      id = 3,   icon = "♪"},
-	{name = "Music",      id = 300, icon = "♪"},
+	{name = "Sound FX",   id = 3,   icon = "🔊"},
+	{name = "Music",      id = 300, icon = "🎵"},
 	{name = "Plugins",    id = 38,  icon = "🔌"},
 	{name = "Meshes",     id = 40,  icon = "🔷"},
 	{name = "Animations", id = 24,  icon = "🏃"},
 	{name = "Video",      id = 62,  icon = "🎬"},
 	{name = "Fonts",      id = 73,  icon = "Aa"},
 }
-local TYPE_NAMES = {[1]="Image",[3]="Audio",[4]="Mesh",[10]="Model",[13]="Decal",[24]="Animation",[38]="Plugin",[40]="MeshPart",[62]="Video",[73]="Font",[300]="Music"}
-local TYPE_ICONS = {[1]="🖼",[3]="♪",[4]="🔷",[10]="📦",[13]="🖼",[24]="🏃",[38]="🔌",[40]="🔷",[62]="🎬",[73]="Aa",[300]="♪"}
+local TYPE_NAMES = {[1]="Image",[3]="Sound FX",[4]="Mesh",[10]="Model",[13]="Decal",[24]="Animation",[38]="Plugin",[40]="MeshPart",[62]="Video",[73]="Font",[300]="Music"}
+local TYPE_ICONS = {[1]="🖼",[3]="🔊",[4]="🔷",[10]="📦",[13]="🖼",[24]="🏃",[38]="🔌",[40]="🔷",[62]="🎬",[73]="Aa",[300]="🎵"}
 local PAGE_SIZE = 30
 local DEFAULT_MODEL = "gemini-flash-latest"
 local FILE = "RGC_CreatorStore.json"
@@ -509,11 +509,16 @@ end
 -- ===== Audio preview =====
 local sound = new("Sound", {Name = "RGC_CS_Sound", Volume = 1}, SoundService)
 local bPlay
+local playToken = 0
+local function hookSound()
+	sound.Ended:Connect(function() if bPlay then bPlay.Text = "Play audio" end end)
+end
+hookSound()
 local function stopSound()
+	playToken += 1
 	pcall(function() sound:Stop() end)
 	if bPlay then bPlay.Text = "Play audio" end
 end
-sound.Ended:Connect(function() if bPlay then bPlay.Text = "Play audio" end end)
 
 -- ===== Detail popup =====
 local refreshSaved
@@ -568,7 +573,7 @@ local bCopyLua = dBtn("Copy Lua snippet", 5)
 local bCol = dBtn("Collection: Default", 6)
 local bSave = dBtn("Save", 7)
 bPlay = dBtn("Play audio", 8)
-local bInsert = dBtn("Insert to project", 9, C.good)
+local bInsert = dBtn("Insert to Workspace", 9, C.good)
 local bClose = btn(dCard, "X", UDim2.fromOffset(28, 26), UDim2.new(1, -34, 0, 4), C.accent, 13)
 
 local function refreshSaveBtn()
@@ -613,84 +618,139 @@ bSave.MouseButton1Click:Connect(function()
 end)
 bInsert.MouseButton1Click:Connect(function()
 	if not curItem then return end
-	if not projectRoot then showToast("Project root not ready") return end
 	local item = curItem
 	local id, typeId = tonumber(item.id), tonumber(item.typeId)
 	if not id then showToast("Invalid asset ID") return end
+	local lp = Players.LocalPlayer
+	local hrp = lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+	local target = hrp and (hrp.Position + hrp.CFrame.LookVector * 14) or Vector3.new(0, 10, 0)
+	local groundY = hrp and (hrp.Position.Y - 3) or 0
 	local function disableImportedScripts(root)
-		if root:IsA("LuaSourceContainer") then pcall(function() root.Enabled = false end) end
-		for _, child in ipairs(root:GetDescendants()) do
-			if child:IsA("LuaSourceContainer") then pcall(function() child.Enabled = false end) end
+		local function off(o)
+			if o:IsA("LuaSourceContainer") then
+				pcall(function() o.Disabled = true end)
+				pcall(function() o.Enabled = false end)
+			end
 		end
+		off(root)
+		for _, child in ipairs(root:GetDescendants()) do off(child) end
+	end
+	local function place(obj)
+		obj.Parent = Workspace
+		if obj.Parent ~= Workspace then error("Roblox refused to put it in Workspace") end
+		if obj:IsA("Model") then
+			pcall(function()
+				obj:PivotTo(CFrame.new(target))
+				local cf, size = obj:GetBoundingBox()
+				obj:PivotTo(obj:GetPivot() + Vector3.new(0, groundY - (cf.Position.Y - size.Y / 2), 0))
+			end)
+		elseif obj:IsA("BasePart") then
+			obj.Position = target
+		end
+		return obj
 	end
 	local function makePart()
 		local p = Instance.new("Part")
 		p.Name = item.name or "ImportedAsset"
 		p.Anchored = true
 		p.Size = Vector3.new(4, 1, 4)
-		local lp = Players.LocalPlayer
-		local hrp = lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
-		if hrp then p.CFrame = hrp.CFrame * CFrame.new(0, 3, -8) else p.Position = Vector3.new(0, 5, 0) end
+		p.Position = target + Vector3.new(0, 2, 0)
 		return p
 	end
+	local KNOWN = {[3] = true, [300] = true, [13] = true, [1] = true, [40] = true, [4] = true, [24] = true, [62] = true, [38] = true}
+	local placed = nil
 	local ok, msg = pcall(function()
-		if typeId == 10 then
+		if typeId == 3 or typeId == 300 then
+			local snd = Instance.new("Sound")
+			snd.Name = item.name or "ImportedAudio"
+			snd.SoundId = "rbxassetid://" .. id
+			snd.Volume = 1
+			placed = place(snd)
+		elseif typeId == 13 or typeId == 1 then
+			local part = makePart()
+			local decal = Instance.new("Decal")
+			decal.Name = "ImportedDecal"; decal.Texture = "rbxassetid://" .. id
+			decal.Face = Enum.NormalId.Top; decal.Parent = part
+			placed = place(part)
+		elseif typeId == 40 or typeId == 4 then
+			local part = makePart()
+			local mesh = Instance.new("SpecialMesh")
+			mesh.MeshType = Enum.MeshType.FileMesh; mesh.MeshId = "rbxassetid://" .. id; mesh.Parent = part
+			placed = place(part)
+		elseif typeId == 24 then
+			local anim = Instance.new("Animation")
+			anim.Name = item.name or "ImportedAnimation"; anim.AnimationId = "rbxassetid://" .. id
+			placed = place(anim)
+		elseif typeId == 62 then
+			local part = makePart()
+			local surface = Instance.new("SurfaceGui"); surface.Face = Enum.NormalId.Front; surface.Parent = part
+			local video = Instance.new("VideoFrame"); video.Size = UDim2.fromScale(1, 1); video.Video = "rbxassetid://" .. id; video.Parent = surface
+			placed = place(part)
+		elseif typeId == 38 then
+			error("Plugins cannot be installed from an in-game runtime. Copy the ID and install through Studio.")
+		else
+			-- models (and anything not recognised): load the real asset
 			local objects
 			local okGet, got = pcall(function() return game:GetObjects("rbxassetid://" .. id) end)
 			if okGet and type(got) == "table" and #got > 0 then objects = got end
 			if not objects then
-				local InsertService = game:GetService("InsertService")
-				local okLoad, loaded = pcall(function() return InsertService:LoadAsset(id) end)
-				if okLoad and loaded then objects = {loaded} end
+				local okLoad, loaded = pcall(function() return game:GetService("InsertService"):LoadAsset(id) end)
+				if okLoad and loaded then objects = loaded:GetChildren() end
 			end
-			if not objects then error("Model import is blocked by this runtime") end
+			if not objects or #objects == 0 then error("Roblox blocked loading this model in this game/runtime") end
 			for _, obj in ipairs(objects) do
 				disableImportedScripts(obj)
-				obj.Parent = projectRoot
+				placed = place(obj)
 			end
-		elseif typeId == 3 or typeId == 300 then
-			local snd = Instance.new("Sound")
-			snd.Name = item.name or "ImportedAudio"
-			snd.SoundId = "rbxassetid://" .. id
-			snd.Parent = projectRoot
-		elseif typeId == 13 or typeId == 1 then
-			local part = makePart(); part.Parent = projectRoot
-			local decal = Instance.new("Decal")
-			decal.Name = "ImportedDecal"; decal.Texture = "rbxassetid://" .. id
-			decal.Face = Enum.NormalId.Top; decal.Parent = part
-		elseif typeId == 40 or typeId == 4 then
-			local part = makePart(); part.Parent = projectRoot
-			local mesh = Instance.new("SpecialMesh")
-			mesh.MeshType = Enum.MeshType.FileMesh; mesh.MeshId = "rbxassetid://" .. id; mesh.Parent = part
-		elseif typeId == 24 then
-			local anim = Instance.new("Animation")
-			anim.Name = item.name or "ImportedAnimation"; anim.AnimationId = "rbxassetid://" .. id; anim.Parent = projectRoot
-		elseif typeId == 62 then
-			local part = makePart(); part.Parent = projectRoot
-			local surface = Instance.new("SurfaceGui"); surface.Face = Enum.NormalId.Front; surface.Parent = part
-			local video = Instance.new("VideoFrame"); video.Size = UDim2.fromScale(1, 1); video.Video = "rbxassetid://" .. id; video.Parent = surface
-		elseif typeId == 38 then
-			error("Plugins cannot be installed from an in-game runtime. Copy the ID and install through Studio.")
-		else
-			error("This asset type cannot be inserted by this runtime")
 		end
 	end)
-	if ok then detail.Visible = false; showToast("Asset added to RGC_Project (runtime-local)") else showToast("Insert failed: " .. tostring(msg):sub(1, 100)) end
+	if ok then
+		detail.Visible = false
+		showToast("Inserted into Workspace" .. (placed and (": " .. tostring(placed.Name):sub(1, 24)) or "") .. (hrp and " (in front of you)" or ""))
+	else
+		showToast("Insert failed: " .. tostring(msg):sub(1, 90))
+	end
 end)
 
 bPlay.MouseButton1Click:Connect(function()
 	if not curItem then return end
-	local rid = "rbxassetid://" .. tostring(curItem.id)
-	if sound.IsPlaying and sound.SoundId == rid then
+	if bPlay.Text ~= "Play audio" then
 		stopSound()
 		return
 	end
-	sound.SoundId = rid
-	sound:Play()
-	bPlay.Text = "Stop audio"
-	local my = curItem
-	task.delay(5, function()
-		if curItem == my and not sound.IsLoaded then showToast("Audio can't load (private?)") end
+	local rid = "rbxassetid://" .. tostring(curItem.id)
+	playToken += 1
+	local my = playToken
+	pcall(function() sound:Stop() sound:Destroy() end)
+	sound = new("Sound", {Name = "RGC_CS_Sound", Volume = 1, Looped = false, SoundId = rid}, SoundService)
+	hookSound()
+	bPlay.Text = "Loading..."
+	task.spawn(function()
+		local function attempt(parent)
+			sound.Parent = parent
+			pcall(function() game:GetService("ContentProvider"):PreloadAsync({sound}) end)
+			local t0 = os.clock()
+			while my == playToken and not sound.IsLoaded and sound.TimeLength <= 0 and os.clock() - t0 < 6 do task.wait(0.2) end
+			return sound.IsLoaded or sound.TimeLength > 0
+		end
+		local loaded = attempt(SoundService)
+		if my ~= playToken then return end
+		if not loaded then loaded = attempt(Workspace) end
+		if my ~= playToken then return end
+		sound:Play()
+		if not loaded then
+			task.wait(2.5)
+			if my ~= playToken then return end
+			loaded = sound.IsPlaying or sound.IsLoaded or sound.TimeLength > 0
+		end
+		if loaded then
+			bPlay.Text = "Stop audio"
+			local len = sound.TimeLength
+			if len and len > 0 then showToast(("Playing - %d:%02d"):format(math.floor(len / 60), math.floor(len % 60))) end
+		else
+			bPlay.Text = "Play audio"
+			showToast("This game didn't load that audio (restricted or removed). Try another.")
+		end
 	end)
 end)
 bClose.MouseButton1Click:Connect(function()
@@ -727,6 +787,20 @@ local v2PageToken = nil
 local v2Type = {[1] = "Model", [2] = "Decal", [3] = "Audio", [4] = "Audio", [5] = "Plugin", [6] = "MeshPart", [8] = "Video", [9] = "FontFamily"}
 local loadBtn
 local search
+local function audioKind(ad)
+	if type(ad) ~= "table" then return nil end
+	local t = ad.audioType
+	if type(t) == "table" then
+		for _, x in ipairs(t) do
+			local s = tostring(x):lower()
+			if s == "0" or s == "music" then return "music" end
+			if s == "1" or s == "soundeffect" or s == "sound effect" then return "sfx" end
+		end
+	end
+	local d = tonumber(ad.duration or ad.durationSeconds)
+	if d then return d >= 45 and "music" or "sfx" end
+	return nil
+end
 
 local function updateToolUI()
 	multiBtn.Text = multi and "Select: ON" or "Select: OFF"
@@ -871,7 +945,7 @@ search = function(append)
 
 		local cat = CATS[catIdx]
 		local info, ids, hasNext = {}, {}, false
-		local categoryV2 = v2Type[catIdx]
+		local categoryV2 = (cat.id ~= 3 and cat.id ~= 300) and v2Type[catIdx] or nil
 		local usedV2 = false
 		local res
 		if db.set.storeKey and db.set.storeKey ~= "" and categoryV2 then
@@ -908,7 +982,11 @@ search = function(append)
 		end
 		if not usedV2 then
 			local url = ("%s%d?limit=%d&pageNumber=%d&keyword=%s"):format(MARKET, cat.id, PAGE_SIZE, page, HttpService:UrlEncode(kw))
-			res = getJSON(url)
+			local extra = ""
+			if cat.id == 3 then extra = "&audioTypes=1&maxDuration=45"
+			elseif cat.id == 300 then extra = "&audioTypes=0&minDuration=45" end
+			res = getJSON(url .. extra)
+			if (not res or type(res.data) ~= "table") and extra ~= "" then res = getJSON(url) end
 			if not res or type(res.data) ~= "table" then
 				if append then
 					page = math.max(0, page - 1)
@@ -924,7 +1002,7 @@ search = function(append)
 				if det and type(det.data) == "table" then
 					for _, d in ipairs(det.data) do
 						local a = d.asset or d
-						if a and a.id then info[a.id] = {name = a.name, creator = d.creator and d.creator.name, desc = a.description, typeId = a.typeId} end
+						if a and a.id then info[a.id] = {name = a.name, creator = d.creator and d.creator.name, desc = a.description, typeId = a.typeId, kind = audioKind(a.audioDetails or d.audioDetails)} end
 					end
 				end
 			end
@@ -934,10 +1012,16 @@ search = function(append)
 		if #ids == 0 and not append then status.Text = "No results"; return end
 		status.Text = ""
 		if loadBtn then loadBtn:Destroy() loadBtn = nil end
+		local shown = 0
 		for _, id in ipairs(ids) do
 			local item = info[id] or {}
-			addStoreCell({id = id, name = item.name, typeId = item.typeId or cat.id, creator = item.creator, desc = item.desc})
+			local skip = (cat.id == 3 and item.kind == "music") or (cat.id == 300 and item.kind == "sfx")
+			if not skip then
+				shown += 1
+				addStoreCell({id = id, name = item.name, typeId = item.typeId or cat.id, creator = item.creator, desc = item.desc})
+			end
 		end
+		if shown == 0 and not append and not hasNext then status.Text = "No results" end
 		if hasNext then addLoadMore() end
 	end)
 end
@@ -960,6 +1044,7 @@ for i, c in ipairs(CATS) do
 	b.MouseButton1Click:Connect(function() setCat(i) end)
 end
 goBtn.MouseButton1Click:Connect(function() search(false) end)
+setCat(1) -- load models right away (no need to tap a category first)
 searchBox.FocusLost:Connect(function(enter) if enter then search(false) end end)
 
 -- ===== SAVED PAGE =====
@@ -1195,21 +1280,20 @@ end -- buildSnippetsPage
 buildSnippetsPage()
 
 local function buildAIPage()
--- ===== AI AGENT (Gemini function calling) =====
+-- ===== AI AGENT (OpenRouter tool calling) =====
 local pAI = newPage("AI")
 local LogService = game:GetService("LogService")
 local InsertService = game:GetService("InsertService")
 local lp = Players.LocalPlayer
 
 -- ---------- state ----------
-local history = {}          -- Gemini "contents"
+local history = {}          -- OpenAI-style chat messages
 local busy, stopFlag = false, false
 local notes = ""
 local undoGroups, currentGroup = {}, nil
 local pendingUser = {}
 local spawned = {}          -- threads started by run_script
 local scriptOut = {}        -- output captured from run_script
-local keyIdx = 1
 local changeCount = 0
 
 local function setting(name, default)
@@ -1217,15 +1301,10 @@ local function setting(name, default)
 	if v == nil then return default end
 	return v
 end
-local function getKeys()
-	local keys = {}
-	if type(db.set.gemKeys) == "table" then
-		for _, k in ipairs(db.set.gemKeys) do
-			if type(k) == "string" and k ~= "" then table.insert(keys, k) end
-		end
-	end
-	if #keys == 0 and type(db.set.gemKey) == "string" and db.set.gemKey ~= "" then keys = {db.set.gemKey} end
-	return keys
+local function getKey()
+	local k = db.set.orKey
+	if type(k) ~= "string" then return "" end
+	return (k:gsub("%s+", ""))
 end
 
 local logBuf = {}
@@ -1345,7 +1424,7 @@ local function canEdit(inst)
 	if inst == gui or inst:IsDescendantOf(gui) then return false, "That is the RGC UI itself" end
 	if setting("fullAccess", true) then return true end
 	if inst == projectRoot or inst:IsDescendantOf(projectRoot) then return true end
-	return false, "Outside RGC_Project. Enable 'Full access' in AI settings to edit other places."
+	return false, "Outside RGC_Project. Turn on 'Allow all access' in AI settings to edit other places."
 end
 
 -- ---------- value helpers ----------
@@ -1730,7 +1809,7 @@ def("create_instance", "Create ANY instance (Part, Model, Folder, Sound, PointLi
 	if not parent then return fail(err) end
 	if parent == gui or parent:IsDescendantOf(gui) then return fail("Cannot create inside the RGC UI") end
 	if not setting("fullAccess", true) and not (parent == projectRoot or parent:IsDescendantOf(projectRoot)) then
-		return fail("Outside RGC_Project. Enable 'Full access' in AI settings.")
+		return fail("Outside RGC_Project. Turn on 'Allow all access' in AI settings.")
 	end
 	local className = tostring(a.class_name)
 	local okNew, obj = pcall(Instance.new, className)
@@ -1773,7 +1852,7 @@ def("create_script", "Create (or overwrite/append to) a Script, LocalScript or M
 	if not parent then return fail(err) end
 	if parent == gui or parent:IsDescendantOf(gui) then return fail("Cannot create inside the RGC UI") end
 	if not setting("fullAccess", true) and not (parent == projectRoot or parent:IsDescendantOf(projectRoot)) then
-		return fail("Outside RGC_Project. Enable 'Full access' in AI settings.")
+		return fail("Outside RGC_Project. Turn on 'Allow all access' in AI settings.")
 	end
 	local name = tostring(a.name)
 	local code = tostring(a.source or "")
@@ -1985,7 +2064,7 @@ def("run_script", "Execute Luau locally in this game session and capture print/w
 	source = P("STRING", "Inline Luau to run"),
 	wait_seconds = P("NUMBER", "How long to wait for it to finish (default 3, max 20)"),
 }, nil, function(a)
-	if not setting("allowRun", true) then return fail("Running code is disabled in AI settings") end
+	if not setting("fullAccess", true) then return fail("Running code needs 'Allow all access' to be ON in AI settings") end
 	local src, inst, label_ = nil, nil, "inline"
 	if a.path and a.path ~= "" then
 		local i2, err = resolve(a.path)
@@ -2201,7 +2280,7 @@ local SYSTEM_PROMPT = [==[You are RGC Agent, an autonomous Roblox building and s
 HOW YOU WORK
 - Work like an engineer: explore first (get_tree, list_children, find_instances, read_script), then act, then verify (read back, run_script, get_output).
 - NEVER claim you created, changed or deleted something unless a tool result in this conversation confirmed it (ok=true). If a tool returns an error, read it, fix the cause and retry. Never invent paths: look them up.
-- You may chain as many tool calls as you need. Keep going until the whole task is finished, then give a short final summary: what you made, where it is, how to use it.
+- Every tool call needs VALID JSON arguments. You may chain as many tool calls as you need. Keep going until the whole task is finished, then give a short final summary: what you made, where it is, how to use it.
 - Default place for new things is the folder Workspace/RGC_Project ("project"). Use other places when the user asks or when it is the proper home: ServerScriptService (server scripts), ReplicatedStorage (modules, remotes, shared), StarterGui (UI), StarterPlayer/StarterPlayerScripts (client scripts), StarterPack (tools), Lighting, SoundService.
 - Paths look like Workspace/RGC_Project/Door or ServerScriptService/GameLogic. The first segment is a service. 'game' lists all services.
 
@@ -2223,13 +2302,15 @@ STYLE
 local function systemText()
 	local s = SYSTEM_PROMPT .. "\n\nPROJECT FOLDER: " .. pathOf(projectRoot)
 	if notes ~= "" then s ..= "\n\nYOUR SAVED NOTES / PLAN:\n" .. notes end
-	if not setting("allowRun", true) then s ..= "\n\nNOTE: run_script is disabled by the user." end
-	if not setting("fullAccess", true) then s ..= "\n\nNOTE: you may only modify things inside " .. pathOf(projectRoot) .. "." end
+	if not setting("fullAccess", true) then s ..= "\n\nNOTE: 'Allow all access' is OFF: you may only modify things inside " .. pathOf(projectRoot) .. " and run_script is disabled." end
 	return s
 end
 
 -- ---------- context size control ----------
 local CTX_LIMIT = 260000
+local MAX_STEPS = 200
+local OR_URL = "https://openrouter.ai/api/v1/chat/completions"
+local OR_DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl:free"
 local function strSize(v)
 	local t = type(v)
 	if t == "string" then return #v end
@@ -2240,35 +2321,31 @@ local function strSize(v)
 	end
 	return 8
 end
-local function shrinkStrings(v, limit)
-	if type(v) ~= "table" then return end
-	for k, x in pairs(v) do
-		if type(x) == "string" and #x > limit then
-			v[k] = x:sub(1, limit) .. "...[trimmed]"
-		elseif type(x) == "table" then
-			shrinkStrings(x, limit)
-		end
-	end
-end
 local function compact()
 	local total = strSize(history)
 	if total <= CTX_LIMIT then return end
-	for i = 1, #history - 6 do
-		local c = history[i]
-		local before = strSize(c)
-		for _, p in ipairs(c.parts) do
-			if p.functionResponse then shrinkStrings(p.functionResponse.response, 200)
-			elseif p.functionCall then shrinkStrings(p.functionCall.args, 300) end
+	for i = 1, #history - 8 do
+		local m = history[i]
+		local before = strSize(m)
+		if m.role == "tool" and type(m.content) == "string" and #m.content > 300 then
+			m.content = m.content:sub(1, 300) .. "...[trimmed]"
+		elseif m.role == "assistant" and type(m.tool_calls) == "table" then
+			for _, tc in ipairs(m.tool_calls) do
+				local f = tc["function"]
+				if f and type(f.arguments) == "string" and #f.arguments > 1500 then
+					f.arguments = '{"trimmed":"omitted to save context"}'
+				end
+			end
 		end
-		total -= (before - strSize(c))
+		total -= (before - strSize(m))
 		if total <= CTX_LIMIT * 0.6 then break end
 	end
 end
 local function dropOldest()
-	local cut = math.floor(#history * 0.4)
+	local cut = math.max(1, math.floor(#history * 0.4))
 	for i = cut, #history do
-		local c = history[i]
-		if c and c.role == "user" and c.parts[1] and c.parts[1].text then
+		local m = history[i]
+		if m and m.role == "user" then
 			for _ = 1, i - 1 do table.remove(history, 1) end
 			return true
 		end
@@ -2276,60 +2353,76 @@ local function dropOldest()
 	return false
 end
 
--- ---------- Gemini request with retry + key rotation ----------
+-- ---------- OpenRouter request ----------
 local function modelName()
-	local m = db.set.gemModel
-	return (m and m ~= "") and m or DEFAULT_MODEL
+	local m = db.set.orModel
+	return (type(m) == "string" and m ~= "") and m or OR_DEFAULT_MODEL
+end
+local function lowerTypes(v)
+	if type(v) ~= "table" then return v end
+	local t = {}
+	for k, x in pairs(v) do
+		if k == "type" and type(x) == "string" then t[k] = x:lower() else t[k] = lowerTypes(x) end
+	end
+	return t
+end
+local cachedTools
+local function toolList()
+	if not cachedTools then
+		cachedTools = {}
+		for _, d in ipairs(toolDecls()) do
+			local params = d.parameters and lowerTypes(d.parameters) or {type = "object", properties = {note = {type = "string", description = "unused"}}}
+			table.insert(cachedTools, {type = "function", ["function"] = {name = d.name, description = d.description, parameters = params}})
+		end
+	end
+	return cachedTools
 end
 local setStatus
-local function geminiRequest(maxTokens)
-	local keys = getKeys()
-	if #keys == 0 then return nil, "No Gemini API key. Open Settings (gear) and paste one." end
-	local payload = {
-		system_instruction = {parts = {{text = systemText()}}},
-		contents = history,
-		tools = {{functionDeclarations = toolDecls()}},
-		toolConfig = {functionCallingConfig = {mode = "AUTO"}},
-		generationConfig = {temperature = 0.5, maxOutputTokens = maxTokens},
-	}
+local function llmRequest(maxTokens)
+	local key = getKey()
+	if key == "" then return nil, "No OpenRouter API key. Open Settings (gear) and paste one." end
+	local msgs = {{role = "system", content = systemText()}}
+	for _, m in ipairs(history) do table.insert(msgs, m) end
+	local payload = {model = modelName(), messages = msgs, tools = toolList(), tool_choice = "auto", max_tokens = maxTokens, temperature = 0.4}
 	local okE, body = pcall(HttpService.JSONEncode, HttpService, payload)
 	if not okE then return nil, "Could not encode request: " .. tostring(body) end
-	local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. modelName() .. ":generateContent"
 	local lastErr = "Request failed"
-	for attempt = 1, 7 do
+	for attempt = 1, 6 do
 		if stopFlag then return nil, "Stopped" end
-		if keyIdx > #keys then keyIdx = 1 end
-		local key = keys[keyIdx]
-		local res = doRequest({Url = url, Method = "POST", Headers = {["Content-Type"] = "application/json", ["x-goog-api-key"] = key}, Body = body})
-		local raw
-		if res then
-			raw = res.Body
-		else
-			local okP, r = pcall(function() return game:HttpPostAsync(url .. "?key=" .. key, body, "application/json") end)
-			if okP then raw = r end
-		end
-		if not raw then
+		local res = doRequest({
+			Url = OR_URL, Method = "POST",
+			Headers = {["Content-Type"] = "application/json", ["Authorization"] = "Bearer " .. key, ["HTTP-Referer"] = "https://github.com/devnamegelo", ["X-Title"] = "RGC Glass Creator Studio"},
+			Body = body,
+		})
+		if not res then
 			lastErr = "No response. Your executor may block HTTP requests."
 			setStatus("Network problem, retrying (" .. attempt .. ")", C.warn)
 			task.wait(math.min(2 * attempt, 10))
 		else
-			local okD, data = pcall(HttpService.JSONDecode, HttpService, raw)
+			local status = tonumber(res.StatusCode) or 0
+			local okD, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
 			if not okD or type(data) ~= "table" then
-				lastErr = "Bad response" .. (res and (" (HTTP " .. tostring(res.StatusCode) .. ")") or "")
+				lastErr = "Bad response (HTTP " .. status .. ")"
 				task.wait(2)
-			elseif data.error then
-				local code = tonumber(data.error.code) or 0
-				local msg = tostring(data.error.message or "API error")
+			elseif data.error or status >= 400 then
+				local e = data.error
+				local msg = type(e) == "table" and tostring(e.message or e.code or "API error") or tostring(e or ("HTTP " .. status))
+				local code = (type(e) == "table" and tonumber(e.code)) or status
+				if type(e) == "table" and type(e.metadata) == "table" and e.metadata.raw then
+					msg = msg .. " (" .. tostring(e.metadata.raw):sub(1, 160) .. ")"
+				end
 				lastErr = msg
-				if code == 429 or code == 500 or code == 503 or code == 502 or code == 504 then
-					if #keys > 1 then
-						keyIdx = (keyIdx % #keys) + 1
-						setStatus("Key limit hit, switching key (" .. keyIdx .. "/" .. #keys .. ")", C.warn)
-						task.wait(1)
-					else
-						setStatus("Busy, retrying in " .. math.min(3 * attempt, 20) .. "s", C.warn)
-						task.wait(math.min(3 * attempt, 20))
+				local low = msg:lower()
+				if code == 429 then
+					if low:find("per%-day") or low:find("per day") or low:find("daily") then
+						return nil, "OpenRouter free daily limit reached (" .. msg .. "). Free models allow about 50 requests per day (1000 after buying $10 credits). Try again later."
 					end
+					local w = math.min(6 * attempt, 40)
+					setStatus("Rate limited, waiting " .. w .. "s", C.warn)
+					task.wait(w)
+				elseif code >= 500 or code == 408 then
+					setStatus("Provider busy, retrying (" .. attempt .. ")", C.warn)
+					task.wait(math.min(3 * attempt, 15))
 				else
 					return nil, msg, code
 				end
@@ -2568,10 +2661,10 @@ end
 
 local function pushUserText(text)
 	local last = history[#history]
-	if last and last.role == "user" then
-		table.insert(last.parts, {text = text})
+	if last and last.role == "user" and type(last.content) == "string" then
+		last.content = last.content .. "\n\n" .. text
 	else
-		table.insert(history, {role = "user", parts = {{text = text}}})
+		table.insert(history, {role = "user", content = text})
 	end
 end
 
@@ -2584,27 +2677,26 @@ local function setBusy(v)
 end
 
 local function agentLoop()
-	local step, malformed = 0, 0
-	local maxSteps = tonumber(setting("maxSteps", 120)) or 120
-	local maxTokens = 32768
+	local step, bad = 0, 0
+	local maxTokens = 20000
 	while not stopFlag do
 		step += 1
-		if step > maxSteps then
-			addMessage("sys", "Reached the step limit (" .. maxSteps .. "). Send \"continue\" to keep going, or raise the limit in Settings.")
+		if step > MAX_STEPS then
+			addMessage("sys", "Reached the step limit (" .. MAX_STEPS .. "). Send \"continue\" to keep going.")
 			return
 		end
 		compact()
 		setStatus("Thinking... (step " .. step .. ")", C.accent)
-		local data, err, code = geminiRequest(maxTokens)
+		local data, err = llmRequest(maxTokens)
 		if not data then
 			if stopFlag then return end
 			local low = tostring(err):lower()
-			if maxTokens > 8192 and low:find("max") and low:find("token") and low:find("output") then
-				maxTokens = 8192
+			if maxTokens > 6000 and (low:find("max_tokens") or low:find("max tokens") or low:find("completion tokens")) then
+				maxTokens = 6000
 				step -= 1
 				continue
 			end
-			if (low:find("token") and (low:find("exceed") or low:find("too long"))) or low:find("context") then
+			if low:find("context") and (low:find("length") or low:find("exceed") or low:find("maximum")) then
 				if dropOldest() then
 					addMessage("sys", "Context was too long: dropped the oldest part of the conversation and retrying.")
 					step -= 1
@@ -2614,63 +2706,80 @@ local function agentLoop()
 			addMessage("sys", "Error: " .. tostring(err))
 			return
 		end
-		local cand = data.candidates and data.candidates[1]
-		local parts = cand and cand.content and cand.content.parts
-		local finish = cand and cand.finishReason
-		if not parts or #parts == 0 then
-			if finish == "MALFORMED_FUNCTION_CALL" or finish == "MAX_TOKENS" then
-				malformed += 1
-				if malformed > 3 then addMessage("sys", "The model kept producing oversized/malformed calls. Try a smaller request.") return end
-				pushUserText("Your last response was cut off or malformed (probably too much code in one call). Retry with smaller pieces: at most ~150 lines per create_script call, using mode=append for the following parts.")
-			else
-				addMessage("sys", "The model returned nothing" .. (finish and (" (" .. tostring(finish) .. ")") or "") .. ". Try again or rephrase.")
-				return
-			end
-		else
-			malformed = 0
-			local keep, calls = {}, {}
-			for _, p in ipairs(parts) do
-				if p.functionCall then
-					if type(p.functionCall.args) == "table" and next(p.functionCall.args) == nil then p.functionCall.args = nil end
-					table.insert(keep, p)
-					table.insert(calls, p.functionCall)
-				elseif p.text and p.text ~= "" then
-					table.insert(keep, p)
-					if not p.thought then addMessage("model", p.text) end
-				elseif p.thoughtSignature then
-					table.insert(keep, p)
+		local choice = data.choices and data.choices[1]
+		local msg = choice and choice.message
+		if type(msg) ~= "table" then
+			bad += 1
+			if bad > 2 then addMessage("sys", "The model returned nothing. Try again or rephrase.") return end
+			task.wait(2)
+			continue
+		end
+		local finish = choice.finish_reason
+		local text = type(msg.content) == "string" and trim(msg.content) or ""
+		local calls = {}
+		if type(msg.tool_calls) == "table" then
+			for i, tc in ipairs(msg.tool_calls) do
+				local f = type(tc) == "table" and tc["function"] or nil
+				if f and f.name then
+					local argStr = f.arguments
+					if type(argStr) == "table" then
+						local okA, enc = pcall(HttpService.JSONEncode, HttpService, argStr)
+						argStr = okA and enc or "{}"
+					end
+					if type(argStr) ~= "string" or argStr == "" then argStr = "{}" end
+					table.insert(calls, {id = tc.id or ("call_" .. step .. "_" .. i), name = f.name, argStr = argStr})
 				end
 			end
-			table.insert(history, {role = "model", parts = keep})
-			if #calls == 0 then
-				if finish == "MAX_TOKENS" then
+		end
+		if text ~= "" then addMessage("model", text) end
+		local stored = {role = "assistant"}
+		if text ~= "" then stored.content = text end
+		if #calls > 0 then
+			stored.tool_calls = {}
+			for _, c in ipairs(calls) do
+				table.insert(stored.tool_calls, {id = c.id, type = "function", ["function"] = {name = c.name, arguments = c.argStr}})
+			end
+			if msg.reasoning_details then stored.reasoning_details = msg.reasoning_details end
+		end
+		if #calls == 0 then
+			if text == "" then
+				bad += 1
+				if bad > 2 then addMessage("sys", "The model returned an empty reply" .. (finish and (" (" .. tostring(finish) .. ")") or "") .. ". Try again.") return end
+				pushUserText("Your last reply was empty. Continue the task: call a tool, or give the final answer.")
+			else
+				bad = 0
+				table.insert(history, stored)
+				if finish == "length" then
 					pushUserText("Continue exactly where you stopped.")
 				elseif #pendingUser > 0 then
 					pushUserText(table.remove(pendingUser, 1))
 				else
 					return
 				end
-			else
-				local resp = {}
-				for _, fc in ipairs(calls) do
-					local args = fc.args or {}
-					local done = addToolCard(fc.name, args)
-					local result
-					if stopFlag then
-						result = fail("Stopped by the user")
-					else
-						setStatus("Step " .. step .. " · " .. tostring(fc.name), C.accent)
-						result = execTool(fc.name, args)
-					end
-					done(result)
-					table.insert(resp, {functionResponse = {name = fc.name, response = result, id = fc.id}})
-				end
-				while #pendingUser > 0 do
-					table.insert(resp, {text = "USER (sent while you were working): " .. table.remove(pendingUser, 1)})
-				end
-				table.insert(history, {role = "user", parts = resp})
-				task.wait(0.15)
 			end
+		else
+			bad = 0
+			table.insert(history, stored)
+			for _, c in ipairs(calls) do
+				local okA, args = pcall(HttpService.JSONDecode, HttpService, c.argStr)
+				local result
+				local done = addToolCard(c.name, okA and type(args) == "table" and args or {})
+				if stopFlag then
+					result = fail("Stopped by the user")
+				elseif not okA or type(args) ~= "table" then
+					result = fail("Invalid JSON in tool arguments (the output was probably cut off). Retry with a smaller piece: max ~150 lines per create_script call, then mode=append.")
+				else
+					setStatus("Step " .. step .. " · " .. tostring(c.name), C.accent)
+					result = execTool(c.name, args)
+				end
+				done(result)
+				local okJ, js = pcall(HttpService.JSONEncode, HttpService, result)
+				table.insert(history, {role = "tool", tool_call_id = c.id, content = okJ and js or '{"ok":false,"error":"result not encodable"}'})
+			end
+			while #pendingUser > 0 do
+				pushUserText("USER (sent while you were working): " .. table.remove(pendingUser, 1))
+			end
+			task.wait(0.15)
 		end
 	end
 end
@@ -2683,7 +2792,6 @@ local function runAgent()
 	setBusy(false)
 	if stopFlag then
 		addMessage("sys", "Stopped.")
-		-- keep history valid: make sure it ends with a user turn awaiting a reply
 		stopFlag = false
 	end
 end
@@ -2703,96 +2811,57 @@ local function sLabel(t)
 	l.ZIndex = 10
 	return l
 end
-sLabel("Gemini API key(s). One per line: the agent rotates to the next key when one hits its limit. Saved only on this device.")
-local keyBox = box(setScroll, "Paste key(s), one per line", UDim2.new(1, -6, 0, 64), nil, true)
+sLabel("OpenRouter API key (saved only on this device)")
+local keyBox = box(setScroll, getKey() ~= "" and "Saved - type to replace" or "sk-or-v1-...", UDim2.new(1, -6, 0, 34))
 keyBox.LayoutOrder = sNext()
 keyBox.ZIndex = 10
-local keyInfo = sLabel("")
-sLabel("Model (leave empty for " .. DEFAULT_MODEL .. ")")
-local modelBox = box(setScroll, DEFAULT_MODEL, UDim2.new(1, -6, 0, 32))
+sLabel("Model")
+local modelBox = box(setScroll, OR_DEFAULT_MODEL, UDim2.new(1, -6, 0, 34))
 modelBox.LayoutOrder = sNext()
 modelBox.ZIndex = 10
-modelBox.Text = db.set.gemModel or ""
-sLabel("Creator Store API key (optional, creator-store-product:read). Improves asset search.")
-local storeKeyBox = box(setScroll, (db.set.storeKey and db.set.storeKey ~= "") and "Saved - type to replace" or "Paste Creator Store key", UDim2.new(1, -6, 0, 32))
-storeKeyBox.LayoutOrder = sNext()
-storeKeyBox.ZIndex = 10
-
-local function toggleRow(text, key, default)
-	local b = btn(setScroll, "", UDim2.new(1, -6, 0, 34), nil, C.card, 12)
+modelBox.Text = (type(db.set.orModel) == "string" and db.set.orModel ~= "") and db.set.orModel or OR_DEFAULT_MODEL
+do
+	local b = btn(setScroll, "", UDim2.new(1, -6, 0, 36), nil, C.card, 12)
 	b.LayoutOrder = sNext()
 	b.ZIndex = 10
 	local function paint()
-		local on = setting(key, default)
-		b.Text = text .. ":  " .. (on and "ON" or "OFF")
+		local on = setting("fullAccess", true)
+		b.Text = "Allow all access (read & write):  " .. (on and "ON" or "OFF")
 		b.BackgroundColor3 = on and C.accent or C.card
 	end
 	b.MouseButton1Click:Connect(function()
-		db.set[key] = not setting(key, default)
+		db.set.fullAccess = not setting("fullAccess", true)
 		saveDB()
 		paint()
 	end)
 	paint()
 end
-toggleRow("Full access (edit anywhere, not only RGC_Project)", "fullAccess", true)
-toggleRow("Allow AI to run code (run_script)", "allowRun", true)
-local stepsBtn = btn(setScroll, "", UDim2.new(1, -6, 0, 34), nil, C.card, 12)
-stepsBtn.LayoutOrder = sNext()
-stepsBtn.ZIndex = 10
-local STEP_OPTS = {40, 80, 120, 200, 400}
-local function paintSteps() stepsBtn.Text = "Max steps per request (tap to change):  " .. tostring(setting("maxSteps", 120)) end
-stepsBtn.MouseButton1Click:Connect(function()
-	local cur = setting("maxSteps", 120)
-	local idx = table.find(STEP_OPTS, cur) or 3
-	db.set.maxSteps = STEP_OPTS[(idx % #STEP_OPTS) + 1]
-	saveDB()
-	paintSteps()
-end)
-paintSteps()
-local function refreshKeyInfo()
-	local n = #getKeys()
-	keyInfo.Text = n == 0 and "No key saved yet." or (n .. " key(s) saved. Type new ones above to replace them.")
-end
-refreshKeyInfo()
-local saveKeyBtn = btn(setScroll, "Save settings", UDim2.new(1, -6, 0, 36), nil, C.good, 13)
+local saveKeyBtn = btn(setScroll, "Save", UDim2.new(1, -6, 0, 38), nil, C.good, 14)
 saveKeyBtn.LayoutOrder = sNext()
 saveKeyBtn.ZIndex = 10
 saveKeyBtn.MouseButton1Click:Connect(function()
-	local list = {}
-	for line in keyBox.Text:gmatch("[^\r\n,%s]+") do
-		if #line > 20 then table.insert(list, line) end
-	end
-	if #list > 0 then
-		db.set.gemKeys = list
-		db.set.gemKey = list[1]
+	local k = trim(keyBox.Text)
+	if k ~= "" then
+		db.set.orKey = k
 		keyBox.Text = ""
-		keyIdx = 1
+		keyBox.PlaceholderText = "Saved - type to replace"
 	end
-	local sk = trim(storeKeyBox.Text)
-	if sk ~= "" then
-		db.set.storeKey = sk
-		storeKeyBox.Text = ""
-		storeKeyBox.PlaceholderText = "Saved - type to replace"
-	end
-	db.set.gemModel = trim(modelBox.Text)
+	local m = trim(modelBox.Text)
+	db.set.orModel = (m ~= "") and m or OR_DEFAULT_MODEL
+	modelBox.Text = db.set.orModel
 	saveDB()
-	refreshKeyInfo()
 	settingsPanel.Visible = false
 	showToast("AI settings saved")
 end)
-local closeSet = btn(setScroll, "Close", UDim2.new(1, -6, 0, 30), nil, C.card, 12)
-closeSet.LayoutOrder = sNext()
-closeSet.ZIndex = 10
-closeSet.MouseButton1Click:Connect(function() settingsPanel.Visible = false end)
 setBtn.MouseButton1Click:Connect(function() settingsPanel.Visible = not settingsPanel.Visible end)
 
 -- ---------- input wiring ----------
 local function submit()
 	local txt = trim(inputBox.Text)
 	if txt == "" then return end
-	if #getKeys() == 0 then
+	if getKey() == "" then
 		settingsPanel.Visible = true
-		showToast("Add your Gemini API key first")
+		showToast("Add your OpenRouter API key first")
 		return
 	end
 	inputBox.Text = ""
@@ -2835,7 +2904,7 @@ for i, c in ipairs({
 	chip.MouseButton1Click:Connect(function() inputBox.Text = c[2] inputBox:CaptureFocus() end)
 end
 
-addMessage("model", "Hi! I'm the RGC Agent. I use real tools: I can browse Workspace, ReplicatedStorage, ServerScriptService and more, create folders, parts and scripts, read and edit code, insert Creator Store models, run code and read the output. Add your Gemini key in ⚙ Settings, then tell me what to build.")
+addMessage("model", "Hi! I'm the RGC Agent. I use real tools: I can browse Workspace, ReplicatedStorage, ServerScriptService and more, create folders, parts and scripts, read and edit code, insert Creator Store models, run code and read the output. Add your OpenRouter key in ⚙ Settings, then tell me what to build.")
 
 end -- buildAIPage
 buildAIPage()
